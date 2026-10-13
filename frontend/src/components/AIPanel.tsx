@@ -1,0 +1,363 @@
+import { useEffect, useRef, useState } from "react";
+import { ApiError, aiQuery, recommend } from "../api/client";
+import type { Focus } from "../App";
+import { categoryColor } from "./CulturalMap";
+import type { AIQueryResponse, ObjectWithDistance, RecommendResponse } from "../types";
+
+interface Props {
+  open: boolean;
+  onClose: () => void;
+  onSelect: (id: number) => void;
+  /** показать результаты на карте: подсветка + центрирование (§39) */
+  onFocus: (f: Focus | null) => void;
+  latitude?: number | null;
+  longitude?: number | null;
+  categories?: string[];
+}
+
+/** Примеры запросов для первого знакомства (§40). */
+const DEMO_SCENARIOS: { title: string; query: string; recommend?: boolean }[] = [
+  { title: "Музей ближе всего к Дворцовой площади", query: "Какой музей находится ближе всего к Дворцовой площади?" },
+  { title: "Галереи в радиусе 1 км от Невского", query: "Покажи все галереи в радиусе 1 км от Невского проспекта" },
+  { title: "Что рядом с Эрмитажем", query: "Какие памятники находятся рядом с Эрмитажем?" },
+  { title: "Интересное рядом со мной", query: "Что интересного можно посмотреть рядом с этой точкой?" },
+  {
+    title: "Подборка про русское искусство",
+    query: "Хочу посмотреть русское искусство недалеко от Невского проспекта",
+    recommend: true,
+  },
+];
+
+const HISTORY_KEY = "kmap.ai.history";
+const HISTORY_LIMIT = 5;
+
+function loadHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(items: string[]) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
+  } catch {
+    /* localStorage может быть недоступен — история не критична */
+  }
+}
+
+function fmtDist(m?: number | null): string {
+  if (m === null || m === undefined) return "";
+  return m >= 1000 ? `${(m / 1000).toFixed(1)} км` : `${Math.round(m)} м`;
+}
+
+function ItemRow({
+  item,
+  onSelect,
+}: {
+  item: ObjectWithDistance & { score?: number | null };
+  onSelect: (id: number) => void;
+}) {
+  return (
+    <li className="ai-item">
+      <button className="list-item" onClick={() => onSelect(item.id)}>
+        <span className="dot" style={{ background: categoryColor(item.category) }} />
+        <span className="list-name">{item.name}</span>
+        <span className="muted">{fmtDist(item.distance_meters)}</span>
+      </button>
+    </li>
+  );
+}
+
+/** Собирает Focus из результатов AI-запроса для показа на карте (§39). */
+function toFocus(
+  items: ObjectWithDistance[],
+  label: string,
+  place: AIQueryResponse["resolved_place"],
+  userLat: number | null,
+  userLon: number | null,
+): Focus | null {
+  if (!items.length) return null;
+  const center: [number, number] | null = place
+    ? [place.latitude, place.longitude]
+    : userLat != null && userLon != null
+      ? [userLat, userLon]
+      : null;
+  return {
+    ids: items.map((i) => i.id),
+    center,
+    distances: Object.fromEntries(items.map((i) => [i.id, i.distance_meters ?? 0])),
+    bestId: items[0]?.id ?? null,
+    label,
+  };
+}
+
+/**
+ * AI-помощник (§31): диалог на естественном языке -> структурированный запрос (§25)
+ * и гибридные рекомендации (§30). Показывает, как сервис понял запрос,
+ * и выводит результаты на карту (§39).
+ *
+ * Интерфейс максимально простой: поле ввода и кнопка. Примеры запросов и история
+ * показываются только пока диалог пуст — чтобы не отвлекать от результата.
+ */
+export default function AIPanel({
+  open,
+  onClose,
+  onSelect,
+  onFocus,
+  latitude,
+  longitude,
+  categories,
+}: Props) {
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<AIQueryResponse | null>(null);
+  const [recs, setRecs] = useState<RecommendResponse | null>(null);
+  const [showStructured, setShowStructured] = useState(false);
+  const [history, setHistory] = useState<string[]>(() => loadHistory());
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (open) setTimeout(() => inputRef.current?.focus(), 50);
+  }, [open]);
+
+  // при закрытии панели снимаем выделение на карте
+  useEffect(() => {
+    if (!open) onFocus(null);
+  }, [open, onFocus]);
+
+  if (!open) return null;
+
+  const remember = (q: string) => {
+    const next = [q, ...history.filter((h) => h !== q)].slice(0, HISTORY_LIMIT);
+    setHistory(next);
+    saveHistory(next);
+  };
+
+  const askQuery = async (q: string, asRecommend?: boolean) => {
+    setLoading(true);
+    setError(null);
+    setRecs(null);
+    setResult(null);
+    onFocus(null);
+    remember(q);
+    if (asRecommend) {
+      try {
+        const res = await recommend({
+          query: q,
+          categories: categories?.length ? categories : undefined,
+          latitude,
+          longitude,
+          limit: 10,
+        });
+        setRecs(res);
+        onFocus(toFocus(res.items, `Подборка: «${q}»`, null, latitude ?? null, longitude ?? null));
+      } catch (e) {
+        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+    try {
+      const res = await aiQuery({ query: q, latitude, longitude });
+      setResult(res);
+      onFocus(
+        toFocus(res.items, `AI: «${q}»`, res.resolved_place, latitude ?? null, longitude ?? null),
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const send = () => {
+    const q = text.trim();
+    if (q.length >= 2) void askQuery(q, false);
+  };
+
+  const askRecommend = async () => {
+    const q = text.trim();
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setRecs(null);
+    onFocus(null);
+    if (q) remember(q);
+    try {
+      const res = await recommend({
+        query: q || null,
+        categories: categories?.length ? categories : undefined,
+        latitude,
+        longitude,
+        limit: 10,
+      });
+      setRecs(res);
+      onFocus(
+        toFocus(res.items, q ? `Подборка: «${q}»` : "Подборка поблизости", null,
+                latitude ?? null, longitude ?? null),
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const clear = () => {
+    setText("");
+    setResult(null);
+    setRecs(null);
+    setError(null);
+    setShowStructured(false);
+    onFocus(null);
+    inputRef.current?.focus();
+  };
+
+  const hasAnswer = result !== null || recs !== null;
+
+  return (
+    <aside className="ai-panel">
+      <header className="card-header">
+        <h3 className="ai-title">AI-помощник</h3>
+        <button className="btn btn-ghost" onClick={onClose} aria-label="Закрыть">×</button>
+      </header>
+
+      <form
+        className="ai-input-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <input
+          ref={inputRef}
+          className="input"
+          placeholder="Спросите о местах города…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button className="btn" type="submit" disabled={loading}>
+          {loading ? "…" : "Найти"}
+        </button>
+      </form>
+
+      <div className="ai-hint muted">
+        Например: «музеи рядом с Эрмитажем», «что посмотреть недалеко от Невского»
+      </div>
+
+      {error && <div className="badge error ai-error">{error}</div>}
+      {loading && <div className="muted">Ищу…</div>}
+
+      {/* --- пока диалог пуст: примеры и история --- */}
+      {!hasAnswer && !loading && (
+        <>
+          <div className="demo-block">
+            <div className="chips ai-chips">
+              {DEMO_SCENARIOS.map((s) => (
+                <button
+                  key={s.title}
+                  className="chip chip-button"
+                  title={s.query}
+                  onClick={() => {
+                    setText(s.query);
+                    void askQuery(s.query, s.recommend);
+                  }}
+                >
+                  {s.title}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {history.length > 0 && (
+            <div className="demo-block">
+              <h4 className="muted">Недавние запросы</h4>
+              <div className="chips ai-chips">
+                {history.map((h) => (
+                  <button
+                    key={h}
+                    className="chip chip-button"
+                    onClick={() => {
+                      setText(h);
+                      void askQuery(h, false);
+                    }}
+                  >
+                    {h}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {result && (
+        <section className="ai-result">
+          <p className="ai-explanation">{result.explanation}</p>
+
+          {/* на отказ (action=other) не показываем «ничего не найдено» —
+              explanation уже объясняет, чем сервис может помочь */}
+          {result.action !== "other" && result.total === 0 && (
+            <p className="muted">Ничего не найдено — уточните запрос.</p>
+          )}
+          {result.total > 0 && (
+            <ul className="ai-items">
+              {result.items.map((it) => (
+                <ItemRow key={it.id} item={it} onSelect={onSelect} />
+              ))}
+            </ul>
+          )}
+
+          <div className="ai-footer muted">
+            <button className="link-button inline" onClick={() => setShowStructured((v) => !v)}>
+              {showStructured ? "скрыть детали" : "как понят запрос"}
+            </button>
+            <button className="link-button inline" onClick={clear}>
+              очистить
+            </button>
+          </div>
+
+          {showStructured && (
+            <pre className="ai-json">{JSON.stringify(result.structured, null, 2)}</pre>
+          )}
+        </section>
+      )}
+
+      {recs && (
+        <section className="ai-result">
+          <p className="ai-explanation">{recs.explanation}</p>
+
+          {recs.total === 0 && (
+            <p className="muted">Ничего не найдено — попробуйте изменить запрос или радиус.</p>
+          )}
+          {recs.total > 0 && (
+            <ul className="ai-items">
+              {recs.items.map((it) => (
+                <ItemRow key={it.id} item={it} onSelect={onSelect} />
+              ))}
+            </ul>
+          )}
+
+          <div className="ai-footer muted">
+            <button className="link-button inline" onClick={clear}>
+              очистить
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* кнопка подборки — только пока диалог пуст */}
+      {!hasAnswer && !loading && (
+        <button className="btn btn-ghost ai-rec-btn" onClick={askRecommend}>
+          Подобрать подборку поблизости
+        </button>
+      )}
+    </aside>
+  );
+}

@@ -1,0 +1,60 @@
+services:
+  db:
+    build:
+      context: ./db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-culturalfind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-culturalfind}
+      POSTGRES_DB: ${POSTGRES_DB:-culturalfind}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PG18 (postgis 18-3.6): PGDATA=/var/lib/postgresql/18/docker,
+      # поэтому том монтируется на корень /var/lib/postgresql
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-culturalfind}:${POSTGRES_PASSWORD:-culturalfind}@db:5432/${POSTGRES_DB:-culturalfind}
+      AI_BASE_URL: ${AI_BASE_URL:-http://host.docker.internal:11434}
+      AI_MODEL: ${AI_MODEL:-qwen2.5:7b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      MAP_TILE_URL: ${MAP_TILE_URL:-https://tile.openstreetmap.org/{z}/{x}/{y}.png}
+      GEOCODER_URL: ${GEOCODER_URL:-}
+      MAX_RADIUS_METERS: ${MAX_RADIUS_METERS:-10000}
+      MAX_LIMIT: ${MAX_LIMIT:-100}
+      SCORE_WEIGHT_SEMANTIC: ${SCORE_WEIGHT_SEMANTIC:-0.5}
+      SCORE_WEIGHT_SPATIAL: ${SCORE_WEIGHT_SPATIAL:-0.3}
+      SCORE_WEIGHT_CATEGORY: ${SCORE_WEIGHT_CATEGORY:-0.2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # ETL-скрипты и кэшированные данные доступны внутри контейнера:
+      # docker compose exec backend python scripts/import_data.py
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

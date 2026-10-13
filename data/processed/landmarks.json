@@ -1,0 +1,202 @@
+[
+  {
+    "name": "Государственный Эрмитаж",
+    "synonyms": ["Эрмитаж", "Зимний дворец", "Музей Эрмитаж", "Эрмитажем"],
+    "kind": "landmark",
+    "latitude": 59.9398,
+    "longitude": 30.3157,
+    "geometry_wkt": "POINT(30.3157 59.9398)",
+    "source": "seed",
+    "source_id": "hermitage"
+  },
+  {
+    "name": "Исаакиевский собор",
+    "synonyms": ["Исаакиевский", "Исаакий"],
+    "kind": "landmark",
+    "latitude": 59.9341,
+    "longitude": 30.3062,
+    "geometry_wkt": "POINT(30.3062 59.9341)",
+    "source": "seed",
+    "source_id": "isaakievsky"
+  },
+  {
+    "name": "Храм Воскресения Христова на крови",
+    "synonyms": ["Спас на Крови", "Спас-на-Крови", "Церковь Спаса на Крови"],
+    "kind": "landmark",
+    "latitude": 59.9402,
+    "longitude": 30.3290,
+    "geometry_wkt": "POINT(30.3290 59.9402)",
+    "source": "seed",
+    "source_id": "spas_na_krovi"
+  },
+  {
+    "name": "Казанский собор",
+    "synonyms": ["Казанский", "Казанский кафедральный собор"],
+    "kind": "landmark",
+    "latitude": 59.9343,
+    "longitude": 30.2629,
+    "geometry_wkt": "POINT(30.2629 59.9343)",
+    "source": "seed",
+    "source_id": "kazansky"
+  },
+  {
+    "name": "Петропавловская крепость",
+    "synonyms": ["Петропавловка", "Петропавловская", "Заячий остров"],
+    "kind": "landmark",
+    "latitude": 59.9500,
+    "longitude": 30.3167,
+    "geometry_wkt": "POINT(30.3167 59.9500)",
+    "source": "seed",
+    "source_id": "petropavlovka"
+  },
+  {
+    "name": "Летний сад",
+    "synonyms": ["Летний"],
+    "kind": "landmark",
+    "latitude": 59.9457,
+    "longitude": 30.3370,
+    "geometry_wkt": "POINT(30.3370 59.9457)",
+    "source": "seed",
+    "source_id": "letny"
+  },
+  {
+    "name": "Михайловский дворец",
+    "synonyms": ["Михайловский", "Русский музей", "Государственный Русский музей"],
+    "kind": "landmark",
+    "latitude": 59.9332,
+    "longitude": 30.3363,
+    "geometry_wkt": "POINT(30.3363 59.9332)",
+    "source": "seed",
+    "source_id": "mikhailovsky"
+  },
+  {
+    "name": "Смольный собор",
+    "synonyms": ["Смольный", "Смольный монастырь"],
+    "kind": "landmark",
+    "latitude": 59.9470,
+    "longitude": 30.3953,
+    "geometry_wkt": "POINT(30.3953 59.9470)",
+    "source": "seed",
+    "source_id": "smolny"
+  },
+  {
+    "name": "Александро-Невская лавра",
+    "synonyms": ["Лавра", "Александро-Невская"],
+    "kind": "landmark",
+    "latitude": 59.9208,
+    "longitude": 30.3883,
+    "geometry_wkt": "POINT(30.3883 59.9208)",
+    "source": "seed",
+    "source_id": "lavra"
+  },
+  {
+    "name": "Стрелка Васильевского острова",
+    "synonyms": ["Стрелка ВО", "Стрелка", "Ростральные колонны"],
+    "kind": "landmark",
+    "latitude": 59.9443,
+    "longitude": 30.3062,
+    "geometry_wkt": "POINT(30.3062 59.9443)",
+    "source": "seed",
+    "source_id": "strelka"
+  },
+  {
+    "name": "Невский проспект",
+    "synonyms": ["Невский", "Невском"],
+    "kind": "street",
+    "latitude": 59.9350,
+    "longitude": 30.3250,
+    "geometry_wkt": "POINT(30.3250 59.9350)",
+    "source": "seed",
+    "source_id": "nevsky"
+  },
+  {
+    "name": "Дворцовая площадь",
+    "synonyms": ["Дворцовая", "Дворцовой"],
+    "kind": "square",
+    "latitude": 59.9388,
+    "longitude": 30.3150,
+    "geometry_wkt": "POINT(30.3150 59.9388)",
+    "source": "seed",
+    "source_id": "dvortsovaya"
+  },
+  {
+    "name": "Севкабель Порт",
+    "synonyms": ["Севкабель", "Кабельная"],
+    "kind": "landmark",
+    "latitude": 59.9268,
+    "longitude": 30.2753,
+    "geometry_wkt": "POINT(30.2753 59.9268)",
+    "source": "seed",
+    "source_id": "sevcabel"
+  },
+  {
+    "name": "Новая Голландия",
+    "synonyms": ["Новой Голландии", "Голландии"],
+    "kind": "landmark",
+    "latitude": 59.9290,
+    "longitude": 30.2913,
+    "geometry_wkt": "POINT(30.2913 59.9290)",
+    "source": "seed",
+    "source_id": "novaya_gollandiya"
+  },
+  {
+    "name": "Гостиный двор",
+    "synonyms": ["Гостиный", "Гостином"],
+    "kind": "landmark",
+    "latitude": 59.9343,
+    "longitude": 30.2623,
+    "geometry_wkt": "POINT(30.2623 59.9343)",
+    "source": "seed",
+    "source_id": "gostiny"
+  },
+  {
+    "name": "Таврический сад",
+    "synonyms": ["Таврический", "Таврическом"],
+    "kind": "landmark",
+    "latitude": 59.9481,
+    "longitude": 30.3764,
+    "geometry_wkt": "POINT(30.3764 59.9481)",
+    "source": "seed",
+    "source_id": "tavrichesky"
+  },
+  {
+    "name": "Марсово поле",
+    "synonyms": ["Марсовом", "Марсово"],
+    "kind": "landmark",
+    "latitude": 59.9425,
+    "longitude": 30.3320,
+    "geometry_wkt": "POINT(30.3320 59.9425)",
+    "source": "seed",
+    "source_id": "marsovo"
+  },
+  {
+    "name": "Аничков дворец",
+    "synonyms": ["Аничков", "Аничкова"],
+    "kind": "landmark",
+    "latitude": 59.9356,
+    "longitude": 30.3439,
+    "geometry_wkt": "POINT(30.3439 59.9356)",
+    "source": "seed",
+    "source_id": "anichkov"
+  },
+  {
+    "name": "Елагин дворец",
+    "synonyms": ["Елагин", "Елагином"],
+    "kind": "landmark",
+    "latitude": 59.9787,
+    "longitude": 30.2639,
+    "geometry_wkt": "POINT(30.2639 59.9787)",
+    "source": "seed",
+    "source_id": "elagin"
+  },
+  {
+    "name": "ЦПКиО им. Кирова",
+    "synonyms": ["Парк Кирова", "Кировский парк", "Сад Кирова"],
+    "kind": "landmark",
+    "latitude": 59.9720,
+    "longitude": 30.3040,
+    "geometry_wkt": "POINT(30.3040 59.9720)",
+    "source": "seed",
+    "source_id": "kirov_park"
+  }
+]

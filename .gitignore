@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env / secrets
+.env
+!.env.example
+
+# Данные: сырой кэш источников (322 МБ) не коммитим, но нужное для запуска — коммитим.
+# import_data.py читает data/processed/*.json и data/raw/district_polygon.json,
+# поэтому оба этих пути обязаны попадать в репозиторий, иначе база не поднимется.
+data/raw/*
+!data/raw/district_polygon.json
+data/raw/osm/
+data/raw/wikidata/
+
+# Локальные дампы БД не коммитим (для передачи используется db/dump.sql)
+*.sql.gz
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Логи
+*.log
+logs/
