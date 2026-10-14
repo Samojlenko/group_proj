@@ -12,6 +12,12 @@ interface Props {
   onFocus: (f: Focus | null) => void;
   latitude?: number | null;
   longitude?: number | null;
+  /**
+   * Точка, которую пользователь поставил на карте (кнопка «Что рядом с точкой?»).
+   * Приоритетнее геолокации: её выбрали осознанно.
+   */
+  mapLatitude?: number | null;
+  mapLongitude?: number | null;
   categories?: string[];
 }
 
@@ -20,6 +26,10 @@ const DEMO_SCENARIOS: { title: string; query: string; recommend?: boolean }[] = 
   { title: "Музей ближе всего к Дворцовой площади", query: "Какой музей находится ближе всего к Дворцовой площади?" },
   { title: "Галереи в радиусе 1 км от Невского", query: "Покажи все галереи в радиусе 1 км от Невского проспекта" },
   { title: "Что рядом с Эрмитажем", query: "Какие памятники находятся рядом с Эрмитажем?" },
+  {
+    title: "Что у перекрёстка Пестеля и Моховой",
+    query: "Что интересного есть на пересечении улиц Пестеля и Моховой?",
+  },
   { title: "Интересное рядом со мной", query: "Что интересного можно посмотреть рядом с этой точкой?" },
   {
     title: "Подборка про русское искусство",
@@ -79,19 +89,22 @@ function toFocus(
   place: AIQueryResponse["resolved_place"],
   userLat: number | null,
   userLon: number | null,
+  mapPoint: [number, number] | null = null,
 ): Focus | null {
   if (!items.length) return null;
+  // Приоритет центра: явное место из запроса > точка, поставленная на карте >
+  // геолокация. Точка на карте важнее GPS — её выбрали осознанно.
   const center: [number, number] | null = place
     ? [place.latitude, place.longitude]
-    : userLat != null && userLon != null
-      ? [userLat, userLon]
-      : null;
+    : (mapPoint ?? (userLat != null && userLon != null ? [userLat, userLon] : null));
   return {
     ids: items.map((i) => i.id),
     center,
     distances: Object.fromEntries(items.map((i) => [i.id, i.distance_meters ?? 0])),
     bestId: items[0]?.id ?? null,
     label,
+    // Ключ центрирования не зависит от радиуса: слайдер не дёргает карту (§39).
+    fitKey: `${label}|${center ? `${center[0].toFixed(5)},${center[1].toFixed(5)}` : "auto"}`,
   };
 }
 
@@ -110,8 +123,13 @@ export default function AIPanel({
   onFocus,
   latitude,
   longitude,
+  mapLatitude,
+  mapLongitude,
   categories,
 }: Props) {
+  /** точка, поставленная на карте, — приоритетный центр для «рядом с этой точкой» */
+  const mapPoint: [number, number] | null =
+    mapLatitude != null && mapLongitude != null ? [mapLatitude, mapLongitude] : null;
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -152,10 +170,14 @@ export default function AIPanel({
           categories: categories?.length ? categories : undefined,
           latitude,
           longitude,
+          map_latitude: mapLatitude,
+          map_longitude: mapLongitude,
           limit: 10,
         });
         setRecs(res);
-        onFocus(toFocus(res.items, `Подборка: «${q}»`, null, latitude ?? null, longitude ?? null));
+        onFocus(
+          toFocus(res.items, `Подборка: «${q}»`, null, latitude ?? null, longitude ?? null, mapPoint),
+        );
       } catch (e) {
         setError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
@@ -164,10 +186,23 @@ export default function AIPanel({
       return;
     }
     try {
-      const res = await aiQuery({ query: q, latitude, longitude });
+      const res = await aiQuery({
+        query: q,
+        latitude,
+        longitude,
+        map_latitude: mapLatitude,
+        map_longitude: mapLongitude,
+      });
       setResult(res);
       onFocus(
-        toFocus(res.items, `AI: «${q}»`, res.resolved_place, latitude ?? null, longitude ?? null),
+        toFocus(
+          res.items,
+          `AI: «${q}»`,
+          res.resolved_place,
+          latitude ?? null,
+          longitude ?? null,
+          mapPoint,
+        ),
       );
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : (e as Error).message);
@@ -195,12 +230,20 @@ export default function AIPanel({
         categories: categories?.length ? categories : undefined,
         latitude,
         longitude,
+        map_latitude: mapLatitude,
+        map_longitude: mapLongitude,
         limit: 10,
       });
       setRecs(res);
       onFocus(
-        toFocus(res.items, q ? `Подборка: «${q}»` : "Подборка поблизости", null,
-                latitude ?? null, longitude ?? null),
+        toFocus(
+          res.items,
+          q ? `Подборка: «${q}»` : "Подборка поблизости",
+          null,
+          latitude ?? null,
+          longitude ?? null,
+          mapPoint,
+        ),
       );
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : (e as Error).message);
@@ -250,6 +293,13 @@ export default function AIPanel({
       <div className="ai-hint muted">
         Например: «музеи рядом с Эрмитажем», «что посмотреть недалеко от Невского»
       </div>
+
+      {mapPoint && (
+        <div className="ai-map-point">
+          Точка на карте: {mapPoint[0].toFixed(5)}, {mapPoint[1].toFixed(5)} — запросы «рядом»
+          считаю от неё, а не от геолокации.
+        </div>
+      )}
 
       {error && <div className="badge error ai-error">{error}</div>}
       {loading && <div className="muted">Ищу…</div>}

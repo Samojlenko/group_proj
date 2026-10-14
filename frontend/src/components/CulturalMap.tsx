@@ -99,6 +99,8 @@ export default function CulturalMap({
     focus: null,
   });
   styleRef.current = { selectedId, focus };
+  /** последний fitKey, по которому карта центрировалась — защита от дёрганья */
+  const lastFitRef = useRef<string | null>(null);
 
   // инициализация карты (один раз)
   useEffect(() => {
@@ -300,7 +302,11 @@ export default function CulturalMap({
     const group = focusRef.current;
     if (!group) return;
     group.clearLayers();
-    if (!focus || !focus.ids.length) return;
+    if (!focus || !focus.ids.length) {
+      // сброс: следующий похожий фокус снова центрирует карту
+      lastFitRef.current = null;
+      return;
+    }
 
     const byId = featureIndexRef.current;
     const points: [number, number][] = [];
@@ -310,20 +316,26 @@ export default function CulturalMap({
     }
     if (!points.length) return;
 
-    // линии «центр → объект» с подписью расстояния
+    // линии «центр → объект» с подписью расстояния.
+    // Рисуем ближайшие 100: при радиусе 3–5 км в фокус попадает 400+ объектов,
+    // и столько же штриховых линий — это и визуальный шум, и заметная
+    // нагрузка на перерисовку SVG при каждом изменении радиуса.
     if (focus.center) {
-      for (const id of focus.ids) {
+      const drawn = focus.ids
+        .map((id) => ({ id, d: focus.distances[id] ?? Number.MAX_SAFE_INTEGER }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 100);
+      for (const { id, d } of drawn) {
         const f = byId.get(id);
         if (!f) continue;
         const [lon, lat] = f.geometry.coordinates;
-        const d = focus.distances[id];
         const line = L.polyline([focus.center, [lat, lon]], {
           color: "#38bdf8",
           weight: 1,
           opacity: 0.55,
           dashArray: "4 6",
         });
-        if (d && d > 0) {
+        if (d > 0 && Number.isFinite(d)) {
           line.bindTooltip(fmtDist(d), { sticky: true, direction: "top" });
         }
         line.addTo(group);
@@ -372,14 +384,18 @@ export default function CulturalMap({
       }
     }
 
-    // центрируем карту на релевантной области (§39)
-    if (mapRef.current) {
+    // Центрируем карту на релевантной области (§39), но только когда сменилось
+    // «намерение» (новый центр или новый запрос), а не значение радиуса:
+    // иначе слайдер с шагом 100 м перетаскивал бы карту на каждое движение.
+    const key = focus.fitKey ?? focus.label;
+    if (mapRef.current && key !== lastFitRef.current) {
       if (points.length > 1) {
         mapRef.current.fitBounds(L.latLngBounds(points), { padding: [50, 50], maxZoom: 16 });
       } else if (points[0]) {
         mapRef.current.setView(points[0], 16);
       }
     }
+    lastFitRef.current = key;
   }, [focus]);
 
   // радиусный поиск: круг + подсветка результатов

@@ -84,14 +84,39 @@ def _pick_coords(
     return None, None
 
 
+def _prefer_map(payload: AIQueryRequest) -> bool:
+    """Человек явно говорит о точке, которую сам поставил на карте.
+
+    Такая точка важнее геолокации: спросив «что здесь?» или «от этой точки»,
+    он имеет в виду место, куда ткнул мышкой, а не своё физическое положение.
+    """
+    return payload.map_latitude is not None and is_deictic(payload.query)
+
+
 def _origin(payload: AIQueryRequest, sq: StructuredQuery) -> tuple[float | None, float | None]:
     """Точка отсчёта запроса — с учётом того, что человек указал точку на карте."""
     return _pick_coords(
         sq.latitude, sq.longitude,
         payload.latitude, payload.longitude,
         payload.map_latitude, payload.map_longitude,
-        prefer_map=payload.map_latitude is not None and is_deictic(payload.query),
+        prefer_map=_prefer_map(payload),
     )
+
+
+def _origin_label(payload: AIQueryRequest, lat: float | None, lon: float | None) -> str:
+    """Человеку важно видеть, от какой точки посчитано расстояние.
+
+    Сравниваем с допуском: бэкенд и фронт приходят с разной точностью,
+    поэтому «это та же точка» проверяется приближённо, а не по `==`.
+    """
+    def same(a: float | None, b: float | None) -> bool:
+        return a is not None and b is not None and abs(a - b) < 1e-6
+
+    if same(lat, payload.map_latitude) and same(lon, payload.map_longitude):
+        return "точки на карте"
+    if same(lat, payload.latitude) and same(lon, payload.longitude):
+        return "вашего местоположения"
+    return "заданной точки"
 
 
 def _parse_rules(payload: AIQueryRequest):
@@ -225,10 +250,7 @@ def ai_query(
         }
 
     if sq.action == "recommend":
-        user_lat, user_lon = _pick_coords(
-            None, None, payload.latitude, payload.longitude,
-            payload.map_latitude, payload.map_longitude,
-        )
+        user_lat, user_lon = _origin(payload, sq)
         lat, lon, place = _resolve_target(db, settings, sq, user_lat, user_lon)
         result = run_recommend(
             db, settings,
@@ -251,11 +273,7 @@ def ai_query(
         }
 
     # --- прочие действия: нужны координаты для пространственных -------------
-    lat, lon = _pick_coords(
-        sq.latitude, sq.longitude,
-        payload.latitude, payload.longitude,
-        payload.map_latitude, payload.map_longitude,
-    )
+    lat, lon = _origin(payload, sq)
     place_info = None
     if sq.place:
         lat, lon, place_info = _resolve_target(db, settings, sq, lat, lon)
@@ -292,7 +310,11 @@ def ai_query(
         items, total, _in_radius = q.radius_objects(
             db, lat, lon, radius, categories=categories, limit=limit,
         )
-        where_label = f"«{place_info['label']}»" if place_info else "заданной точки"
+        # человек должен видеть, откуда посчитано: «точки на карте» — это
+        # та точка, которую он поставил, а не его геолокация
+        where_label = (
+            f"«{place_info['label']}»" if place_info else _origin_label(payload, lat, lon)
+        )
         explanation = (f"Объекты в радиусе {radius:.0f} м от {where_label}"
                        f" ({_labels(sq.categories)})")
     else:  # pragma: no cover - Literal защищает от неизвестных действий
@@ -333,13 +355,17 @@ def recommend(
 
     # Точка отсчёта: место из текста («недалеко от Невского проспекта») важнее
     # геолокации — иначе при включённом GPS запрос про Невский отработает от
-    # пользователя. Дальше — координаты пользователя, затем точка на карте.
+    # пользователя. Дальше — точка с карты, если человек о ней и говорит,
+    # иначе координаты пользователя.
     lat, lon = _pick_coords(
         None, None, payload.latitude, payload.longitude,
         payload.map_latitude, payload.map_longitude,
+        prefer_map=_prefer_map(payload),
     )
     place = None
-    if payload.query:
+    # «этой точкой» — не название места: не шлём фиктивный запрос к резолверу,
+    # а берём координаты карты, которые уже подобраны выше
+    if payload.query and not _prefer_map(payload):
         name = _place_from_text(payload.query)
         if name:
             try:

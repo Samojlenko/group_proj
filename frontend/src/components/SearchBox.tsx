@@ -15,6 +15,8 @@ interface Props {
   categories?: string[];
   latitude?: number;
   longitude?: number;
+  /** очистить поиск (кнопка ×) — App сбрасывает текст, фокус и подсветку */
+  onClear?: () => void;
 }
 
 const MIN_QUERY = 2;
@@ -49,6 +51,7 @@ export default function SearchBox({
   categories,
   latitude,
   longitude,
+  onClear,
 }: Props) {
   const [items, setItems] = useState<ObjectWithDistance[]>([]);
   const [open, setOpen] = useState(false);
@@ -166,6 +169,21 @@ export default function SearchBox({
           onFocus={() => value.trim().length >= MIN_QUERY && setOpen(true)}
           onKeyDown={onKeyDown}
         />
+
+        {value.trim() && onClear && (
+          <button
+            type="button"
+            className="search-clear"
+            aria-label="Очистить поиск"
+            onClick={() => {
+              onClear();
+              setOpen(false);
+              inputRef.current?.focus();
+            }}
+          >
+            ×
+          </button>
+        )}
 
         {visible && (
           <div className="search-drop" role="listbox">
