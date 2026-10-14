@@ -193,28 +193,39 @@ def radius(
     longitude: float = Query(...),
     radius_meters: float = Query(..., gt=0, description="Радиус в метрах"),
     category: list[str] | None = Query(default=None),
+    not_keyword: str | None = Query(
+        default=None,
+        description="Исключить объекты с этим ключевым словом (напр., «мемориальная доска»)",
+    ),
     limit: int = Query(default=100, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict:
+    """Страница ``items`` ограничена ``limit`` (MAX_LIMIT, §42), но подсветка на
+    карте считается по ``in_radius`` — всем объектам внутри круга, без LIMIT.
+    """
     validate_coords(latitude, longitude)
     validate_radius(radius_meters, settings)
     limit = validate_limit(limit, settings)
-    items, total = sq.radius_objects(
+    items, total, in_radius = sq.radius_objects(
         db,
         latitude,
         longitude,
         radius_meters,
         categories=validate_categories(category),
+        not_keyword=not_keyword,
         limit=limit,
         offset=offset,
     )
     return {
         "items": [_with_distance(r) for r in items],
         "total": total,
+        "in_radius": in_radius,
         "radius_meters": radius_meters,
         "center": {"latitude": latitude, "longitude": longitude},
+        "limit": limit,
+        "offset": offset,
     }
 
 
@@ -295,8 +306,11 @@ def object_nearby(
 # --- справочники и статистика ---------------------------------------------------
 
 @router.get("/categories", response_model=list[CategoryInfo], summary="Категории объектов (§6)")
-def categories(db: Session = Depends(get_db)) -> list[dict]:
-    counts = sq.category_counts(db)
+def categories(
+    not_keyword: str | None = Query(default=None, description="Исключить объекты с этим ключевым словом"),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    counts = sq.category_counts(db, not_keyword=not_keyword)
     codes = list(CATEGORY_LABELS) + [c for c in counts if c not in CATEGORY_LABELS]
     return [
         {"code": code, "label": CATEGORY_LABELS.get(code, code)}
@@ -306,5 +320,8 @@ def categories(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.get("/statistics", response_model=StatisticsResponse, summary="Статистика (§36)")
-def statistics(db: Session = Depends(get_db)) -> dict:
-    return sq.statistics(db)
+def statistics(
+    not_keyword: str | None = Query(default=None, description="Исключить объекты с этим ключевым словом"),
+    db: Session = Depends(get_db),
+) -> dict:
+    return sq.statistics(db, not_keyword=not_keyword)

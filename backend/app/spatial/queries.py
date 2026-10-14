@@ -80,6 +80,28 @@ def _run(db: Session, sql: str, params: dict) -> list:
     return db.execute(text(sql), params).mappings().all()
 
 
+def _with_rounded_distance(row: dict) -> dict:
+    """Округляет метры до 0.1 — единый вид distance_meters во всех ответах."""
+    if row.get("distance_meters") is not None:
+        row["distance_meters"] = round(row["distance_meters"], 1)
+    return row
+
+
+def _plain_filters(**overrides) -> tuple[str, dict]:
+    """WHERE без текстовых/категорийных условий — для агрегатов и radius.
+
+    Нужен, чтобы один и тот же набор фильтров (например, скрытые мемориальные
+    доски) применялся и к выборке, и к счётчикам: иначе в сайдбаре 474 объекта,
+    а на карте 281.
+    """
+    base: dict = dict(
+        categories=None, q=None, theme=None, keyword=None,
+        has_website=None, has_description=None, within_district=False,
+    )
+    base.update(overrides)
+    return _filters_sql(**base)
+
+
 def get_object(db: Session, object_id: int) -> dict | None:
     """Карточка объекта (§33) — точный выбор по id."""
     rows = _run(
@@ -90,9 +112,14 @@ def get_object(db: Session, object_id: int) -> dict | None:
     return dict(rows[0]) if rows else None
 
 
-def category_counts(db: Session) -> dict[str, int]:
-    """Счётчики по категориям (§6, §36)."""
-    rows = _run(db, "SELECT category, count(*) AS n FROM cultural_objects GROUP BY category", {})
+def category_counts(db: Session, *, not_keyword: str | None = None) -> dict[str, int]:
+    """Счётчики по категориям (§6, §36) — с учётом тех же фильтров, что на карте."""
+    where, params = _plain_filters(not_keyword=not_keyword)
+    rows = _run(
+        db,
+        f"SELECT c.category, count(*) AS n FROM cultural_objects c {where} GROUP BY c.category",
+        params,
+    )
     return {r["category"]: r["n"] for r in rows}
 
 
@@ -206,30 +233,46 @@ def radius_objects(
     radius_m: float,
     *,
     categories: list[str] | None = None,
+    not_keyword: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> tuple[list[dict], int]:
-    """§12: поиск в радиусе (ST_DWithin по индексу geog, затем точная метрика)."""
-    where, params = _filters_sql(
-        categories=categories, q=None, theme=None, keyword=None,
-        has_website=None, has_description=None, within_district=False,
-    )
+) -> tuple[list[dict], int, list[dict]]:
+    """§12: поиск в радиусе (ST_DWithin по индексу geog, затем точная метрика).
+
+    Возвращает ``(страница, total, in_radius)``:
+
+    * ``items`` — ``limit`` строк с ``offset`` (выдача ограничена MAX_LIMIT);
+    * ``total`` — сколько объектов реально попало в радиус;
+    * ``in_radius`` — id и расстояние **всех** объектов в радиусе, без LIMIT.
+
+    ``in_radius`` нужен карте: подсветка маркеров должна соответствовать кругу
+    на карте, а не первым 100 строкам выдачи (иначе при большом радиусе часть
+    объектов внутри круга остаётся неакцентированной). total == len(in_radius):
+    тот же WHERE, только без LIMIT.
+    """
+    where, params = _plain_filters(categories=categories, not_keyword=not_keyword)
     params.update(_point_params(lat, lon))
     params["radius"] = radius_m
-    count_sql = f"""
-    SELECT count(*) AS n FROM cultural_objects c
-    {where} {('AND' if where else 'WHERE')} ST_DWithin(c.geog, CAST(:point AS geography), :radius)
-    """
-    total = _run(db, count_sql, params)[0]["n"]
-    sql = f"""
-    SELECT {OBJ_COLS}{DIST_COL}
-    FROM cultural_objects c
-    {where} {('AND' if where else 'WHERE')} ST_DWithin(c.geog, CAST(:point AS geography), :radius)
-    ORDER BY distance_meters
-    LIMIT :limit OFFSET :offset
-    """
-    rows = _run(db, sql, {**params, "limit": limit, "offset": offset})
-    return [dict(r) for r in rows], total
+    within = (
+        f"{where} {('AND' if where else 'WHERE')} "
+        f"ST_DWithin(c.geog, CAST(:point AS geography), :radius)"
+    )
+
+    in_rows = _run(
+        db,
+        f"SELECT c.id{DIST_COL} FROM cultural_objects c {within} ORDER BY distance_meters",
+        params,
+    )
+    in_radius = [_with_rounded_distance(dict(r)) for r in in_rows]
+    total = len(in_radius)
+
+    rows = _run(
+        db,
+        f"SELECT {OBJ_COLS}{DIST_COL} FROM cultural_objects c {within} "
+        f"ORDER BY distance_meters LIMIT :limit OFFSET :offset",
+        {**params, "limit": limit, "offset": offset},
+    )
+    return [dict(r) for r in rows], total, in_radius
 
 
 def distance_between(db: Session, id_a: int, id_b: int) -> dict | None:
@@ -338,29 +381,37 @@ def text_search(
     return [dict(r) for r in _run(db, sql, params)], total
 
 
-def statistics(db: Session) -> dict:
-    """§36: статистика по объектам."""
-    rows = _run(db, """
+def statistics(db: Session, *, not_keyword: str | None = None) -> dict:
+    """§36: статистика по объектам.
+
+    ``not_keyword`` — тот же фильтр, что на карте (по умолчанию статистика
+    глобальная): без него счётчики в сайдбаре не сходятся с видимыми объектами.
+    """
+    where, params = _plain_filters(not_keyword=not_keyword)
+    rows = _run(db, f"""
         SELECT
             count(*) AS total,
-            count(*) FILTER (WHERE website IS NOT NULL AND website <> '') AS with_website,
-            count(*) FILTER (WHERE description IS NOT NULL) AS with_description
-        FROM cultural_objects
-    """, {})
-    by_cat = {r["category"]: r["n"] for r in _run(db, """
-        SELECT category, count(*) AS n FROM cultural_objects GROUP BY category ORDER BY n DESC
-    """, {})}
-    extent = _run(db, """
-        SELECT ST_XMin(ST_Extent(geometry)) AS min_lon, ST_YMin(ST_Extent(geometry)) AS min_lat,
-               ST_XMax(ST_Extent(geometry)) AS max_lon, ST_YMax(ST_Extent(geometry)) AS max_lat
-        FROM cultural_objects
-    """, {})[0]
+            count(*) FILTER (WHERE c.website IS NOT NULL AND c.website <> '') AS with_website,
+            count(*) FILTER (WHERE c.description IS NOT NULL) AS with_description
+        FROM cultural_objects c
+        {where}
+    """, params)[0]
+    by_cat = {r["category"]: r["n"] for r in _run(db, f"""
+        SELECT c.category, count(*) AS n FROM cultural_objects c {where}
+        GROUP BY c.category ORDER BY n DESC
+    """, params)}
+    extent = _run(db, f"""
+        SELECT ST_XMin(ST_Extent(c.geometry)) AS min_lon, ST_YMin(ST_Extent(c.geometry)) AS min_lat,
+               ST_XMax(ST_Extent(c.geometry)) AS max_lon, ST_YMax(ST_Extent(c.geometry)) AS max_lat
+        FROM cultural_objects c
+        {where}
+    """, params)[0]
     updated = _run(db, "SELECT max(updated_at) AS updated_at FROM cultural_objects", {})[0]
     return {
-        "total": rows[0]["total"],
+        "total": rows["total"],
         "by_category": by_cat,
-        "with_website": rows[0]["with_website"],
-        "with_description": rows[0]["with_description"],
+        "with_website": rows["with_website"],
+        "with_description": rows["with_description"],
         "bbox": dict(extent) if extent and extent["min_lon"] is not None else None,
         "updated_at": updated["updated_at"],
     }

@@ -91,11 +91,26 @@ export interface ListResponse {
   offset: number;
 }
 
+/** Строка в `in_radius`: id + расстояние для подсветки на карте */
+export interface RadiusId {
+  id: number;
+  distance_meters?: number | null;
+}
+
 export interface RadiusResponse {
+  /** страница выдачи: не больше `limit` (MAX_LIMIT на бэке) */
   items: ObjectWithDistance[];
+  /** сколько объектов реально внутри радиуса */
   total: number;
+  /**
+   * все объекты внутри круга без LIMIT — по ним считается подсветка маркеров.
+   * Нужно потому, что `items` обрезан (100 строк), а круг на карте больше.
+   */
+  in_radius?: RadiusId[];
   radius_meters: number;
   center: { latitude: number; longitude: number };
+  limit?: number;
+  offset?: number;
 }
 
 export interface SearchResponse {

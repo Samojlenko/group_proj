@@ -42,6 +42,12 @@ export interface Focus {
   distances: Record<number, number>;
   bestId: number | null;
   label: string;
+  /**
+   * Ключ, по которому карта центрируется (`fitBounds`).
+   * Меняется только при новом «намерении» (другой центр/запрос), а не при
+   * уточнении радиуса — иначе слайдер перетаскивает карту на каждые 100 м.
+   */
+  fitKey?: string;
 }
 
 /**
@@ -72,6 +78,8 @@ function ObjectShell() {
 
 function MapShell() {
   const [health, setHealth] = useState<Health | null>(null);
+  /** первая проверка уже прошла — тогда «нет связи» не мигает при загрузке */
+  const [healthChecked, setHealthChecked] = useState(false);
   const [categories, setCategories] = useState<{ code: string; label: string }[]>([]);
   const [stats, setStats] = useState<Statistics | null>(null);
   const [density, setDensity] = useState<
@@ -129,11 +137,13 @@ function MapShell() {
   // --- справочники, здоровье (периодическое обновление) и граница района ------
   useEffect(() => {
     let alive = true;
-    const load = () => getHealth().then((h) => alive && setHealth(h)).catch(() => alive && setHealth(null));
+    const load = () =>
+      getHealth()
+        .then((h) => alive && setHealth(h))
+        .catch(() => alive && setHealth(null))
+        .finally(() => alive && setHealthChecked(true));
     load();
     const timer = setInterval(load, 30000); // бейдж не должен врать (§44)
-    getCategories().then((c) => alive && setCategories(c)).catch(() => undefined);
-    getStatistics().then((s) => alive && setStats(s)).catch(() => undefined);
     getNeighbours().then((n) => alive && setNeighbours(n)).catch(() => undefined);
     getDensity(250, 8)
       .then((r) => alive && setDensity(r.zones))
@@ -146,6 +156,19 @@ function MapShell() {
       clearInterval(timer);
     };
   }, []);
+
+  // --- справочники и статистика: считаются по тем же фильтрам, что и карта ----
+  // иначе в сайдбаре «Мемориалы: 310», а на карте их 117 (доски скрыты)
+  useEffect(() => {
+    const controller = new AbortController();
+    getCategories(filters, controller.signal)
+      .then((c) => !controller.signal.aborted && setCategories(c))
+      .catch(() => undefined);
+    getStatistics(filters, controller.signal)
+      .then((s) => !controller.signal.aborted && setStats(s))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [filters.not_keyword]);
 
   // --- тепловая карта плотности (§37) -----------------------------------------
   useEffect(() => {
@@ -252,6 +275,7 @@ function MapShell() {
             ),
             bestId: r.items[0]?.id ?? null,
             label: `Поиск: «${q.trim()}»`,
+            fitKey: `search:${q.trim()}`,
           });
         })
         .catch((e: Error) => {
@@ -264,6 +288,16 @@ function MapShell() {
     [filters.category, userLocation],
   );
 
+  /** Сброс текстового поиска: результаты, подсветка и поле ввода. */
+  const clearSearch = useCallback(() => {
+    searchAbortRef.current?.abort();
+    setSearchQuery("");
+    setSearchResults(null);
+    setSearchTotal(null);
+    setAiFocus(null);
+    setError(null);
+  }, []);
+
   // --- поиск в радиусе (§12) ---------------------------------------------------
   useEffect(() => {
     if (!radiusMode || !radiusCenter) {
@@ -271,30 +305,46 @@ function MapShell() {
       return;
     }
     const controller = new AbortController();
-    // limit ограничен MAX_LIMIT=100 на бэке (§42); сколько объектов реально
-    // нашлось — показывает radiusResults.total (items — первые 100)
-    getRadius(
-      radiusCenter[0],
-      radiusCenter[1],
-      radiusMeters,
-      { limit: 100, category: filters.category?.length ? filters.category : undefined },
-      controller.signal,
-    )
-      .then(setRadiusResults)
-      .catch((e: Error) => {
-        if (!isAbort(e)) setError(e.message);
-      });
-    return () => controller.abort();
-  }, [radiusMode, radiusCenter, radiusMeters, filters.category]);
+    // слайдер шагает по 100 м — без дебаунса мы шлём запрос на каждое положение
+    const timer = setTimeout(() => {
+      // limit ограничен MAX_LIMIT=100 на бэке (§42): items — первые 100 строк,
+      // а подсветка на карте строится по in_radius (все объекты в круге)
+      getRadius(
+        radiusCenter[0],
+        radiusCenter[1],
+        radiusMeters,
+        {
+          limit: 100,
+          category: filters.category?.length ? filters.category : undefined,
+          not_keyword: filters.not_keyword,
+        },
+        controller.signal,
+      )
+        .then((r) => !controller.signal.aborted && setRadiusResults(r))
+        .catch((e: Error) => {
+          if (!isAbort(e)) setError(e.message);
+        });
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [radiusMode, radiusCenter, radiusMeters, filters.category, filters.not_keyword]);
+
+  /** id всех объектов внутри круга (не только первых 100 строк выдачи). */
+  const inRadiusIds = useMemo(() => {
+    if (!radiusResults) return [] as { id: number; distance_meters?: number | null }[];
+    return radiusResults.in_radius ?? radiusResults.items.map((i) => ({ id: i.id, distance_meters: i.distance_meters }));
+  }, [radiusResults]);
 
   const radiusView: RadiusView | null = useMemo(() => {
     if (!radiusMode || !radiusCenter || !radiusResults) return null;
     return {
       center: radiusCenter,
       radiusMeters,
-      resultIds: radiusResults.items.map((i) => i.id),
+      resultIds: inRadiusIds.map((i) => i.id),
     };
-  }, [radiusMode, radiusCenter, radiusResults, radiusMeters]);
+  }, [radiusMode, radiusCenter, radiusResults, radiusMeters, inRadiusIds]);
 
   /** Избранное — локальный фильтр поверх загруженных объектов. */
   const visibleFeatures = useMemo(
@@ -307,13 +357,16 @@ function MapShell() {
     if (aiFocus) return aiFocus;
     if (radiusMode && radiusCenter && radiusResults) {
       return {
-        ids: radiusResults.items.map((i) => i.id),
+        // подсветка — по всем объектам в круге, а не по первым 100 строкам
+        ids: inRadiusIds.map((i) => i.id),
         center: radiusCenter,
         distances: Object.fromEntries(
-          radiusResults.items.map((i) => [i.id, i.distance_meters ?? 0]),
+          inRadiusIds.map((i) => [i.id, i.distance_meters ?? 0]),
         ),
         bestId: null,
         label: `Радиус ${radiusMeters} м`,
+        // центр не меняется при движении слайдера — карта не должна дёргаться
+        fitKey: `radius:${radiusCenter[0].toFixed(5)},${radiusCenter[1].toFixed(5)}`,
       };
     }
     if (searchResults) {
@@ -325,10 +378,11 @@ function MapShell() {
         ),
         bestId: searchResults[0]?.id ?? null,
         label: `Поиск: «${searchQuery}»`,
+        fitKey: `search:${searchQuery}`,
       };
     }
     return null;
-  }, [aiFocus, radiusMode, radiusCenter, radiusResults, radiusMeters, searchResults, searchQuery]);
+  }, [aiFocus, radiusMode, radiusCenter, radiusResults, radiusMeters, searchResults, searchQuery, inRadiusIds]);
 
   const handleMapClick = useCallback((lat: number, lon: number) => {
     setRadiusCenter([lat, lon]);
@@ -365,6 +419,7 @@ function MapShell() {
           value={searchQuery}
           onValueChange={setSearchQuery}
           onSubmit={submitSearch}
+          onClear={clearSearch}
           onSelect={(id, name) => {
             // выбор подсказки: открываем карточку и центрируем карту (§38)
             setSearchQuery(name);
@@ -381,7 +436,10 @@ function MapShell() {
           >
             AI-помощник
           </button>
-          {health && health.status !== "ok" && (
+          {healthChecked && health === null && (
+            <span className="badge error">Нет связи с сервером</span>
+          )}
+          {health !== null && health.status !== "ok" && (
             <span className="badge error">Сервис временно недоступен</span>
           )}
         </div>
@@ -477,6 +535,9 @@ function MapShell() {
           onFocus={setAiFocus}
           latitude={userLocation?.[0] ?? null}
           longitude={userLocation?.[1] ?? null}
+          // точка, выбранная на карте: помощник должен уметь считать от неё
+          mapLatitude={radiusCenter?.[0] ?? null}
+          mapLongitude={radiusCenter?.[1] ?? null}
           categories={filters.category}
         />
 

@@ -19,7 +19,7 @@ from app.ai.client import check_available as available
 from app.ai.parser import AIQueryError, parse_with_fallback
 from app.ai.recommend import recommend as run_recommend
 from app.ai.resolver import PlaceNotFound, resolve_place
-from app.ai.rules import parse_rules
+from app.ai.rules import is_deictic, parse_rules
 from app.ai.schemas_ai import StructuredQuery
 from app.config import Settings, get_settings
 from app.constants import CATEGORY_LABELS
@@ -35,6 +35,71 @@ from app.spatial import queries as q
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["ai"])
+
+# Пользователю — только человеческий текст: технические детали разбора
+# (Pydantic, номера параграфов) уходят в лог, а не в интерфейс (§44).
+PARSE_FAILED_HINT = (
+    "Не получилось разобрать запрос. Попробуйте переформулировать — например: "
+    "«музеи рядом с Эрмитажем», «галереи в радиусе 1 км от Невского проспекта», "
+    "«что посмотреть недалеко от Дворцовой площади»"
+)
+PLACE_NOT_FOUND_HINT = (
+    "Не удалось найти такое место на карте. Назовите улицу, площадь или объект — "
+    "например «Невский проспект», «Дворцовая площадь», «Эрмитаж» — либо кликните "
+    "по карте и спросите «что рядом с этой точкой»"
+)
+NO_ORIGIN_HINT = (
+    "Не понятно, от какой точки считать. Укажите место («рядом с Эрмитажем») "
+    "или кликните по карте — тогда появится центр поиска"
+)
+
+
+def _pick_coords(
+    sq_lat: float | None, sq_lon: float | None,
+    req_lat: float | None, req_lon: float | None,
+    map_lat: float | None, map_lon: float | None,
+    prefer_map: bool = False,
+) -> tuple[float | None, float | None]:
+    """Точка отсчёта для пространственного запроса.
+
+    Пара берётся целиком: смешивать широту одного источника с долготой другого
+    нельзя — получится точка в другом полушарии.
+
+    Порядок:
+
+    1. координаты, которые модель явно поставила в запросе (или извлекли шаблоны);
+    2. далее — точка с карты, если человек о ней и говорит («что здесь?»,
+       «от этой точки», «у метки»): именно её он и имел в виду, даже когда
+       браузер уже отдал геолокацию;
+    3. геолокация пользователя;
+    4. точка с карты как последний вариант — лучше считать от неё, чем
+       отвечать «не понятно, от какой точки считать».
+    """
+    tail = [(map_lat, map_lon), (req_lat, req_lon)] if prefer_map else [
+        (req_lat, req_lon), (map_lat, map_lon),
+    ]
+    for lat, lon in [(sq_lat, sq_lon), *tail]:
+        if lat is not None and lon is not None:
+            return lat, lon
+    return None, None
+
+
+def _origin(payload: AIQueryRequest, sq: StructuredQuery) -> tuple[float | None, float | None]:
+    """Точка отсчёта запроса — с учётом того, что человек указал точку на карте."""
+    return _pick_coords(
+        sq.latitude, sq.longitude,
+        payload.latitude, payload.longitude,
+        payload.map_latitude, payload.map_longitude,
+        prefer_map=payload.map_latitude is not None and is_deictic(payload.query),
+    )
+
+
+def _parse_rules(payload: AIQueryRequest):
+    """Rule-based fallback (§53): карта участвует наравне с геолокацией."""
+    return parse_rules(
+        payload.query, payload.latitude, payload.longitude,
+        payload.map_latitude, payload.map_longitude,
+    )
 
 
 def _ensure_ai(settings: Settings) -> None:
@@ -68,7 +133,8 @@ def _resolve_target(
         try:
             place = resolve_place(db, settings, sq.place)
         except PlaceNotFound as exc:
-            raise HTTPException(422, str(exc)) from exc
+            logger.info("Место не разрешилось: %s (%s)", sq.place, exc)
+            raise HTTPException(422, f"«{sq.place}» — {PLACE_NOT_FOUND_HINT}") from exc
         return place["latitude"], place["longitude"], place
     return req_lat, req_lon, None
 
@@ -89,7 +155,7 @@ def ai_query(
     if not available(settings):
         # сервер недоступен или модель не загружена — не тратим таймаут LLM
         logger.warning("LLM недоступен, пробуем rule-based разбор (§53)")
-        sq = parse_rules(payload.query, payload.latitude, payload.longitude)
+        sq = _parse_rules(payload)
         if sq is None:
             raise HTTPException(
                 503,
@@ -98,20 +164,30 @@ def ai_query(
             )
         fallback_used = True
     else:
+        # координаты точки на карте («что рядом с этой точкой») — дополнительный
+        # контекст для модели; в запрос они попадают только при наличии (§22)
+        map_ctx: dict = {}
+        if payload.map_latitude is not None and payload.map_longitude is not None:
+            map_ctx = {"map_lat": payload.map_latitude, "map_lon": payload.map_longitude}
         try:
-            sq = parse_with_fallback(settings, payload.query, payload.latitude, payload.longitude)
+            sq = parse_with_fallback(
+                settings, payload.query, payload.latitude, payload.longitude, **map_ctx
+            )
         except LLMError as exc:
             # сервер отвалился во время запроса — пробуем шаблоны (§31, §53)
             logger.warning("LLM недоступен во время запроса, пробуем rule-based: %s", exc)
-            sq = parse_rules(payload.query, payload.latitude, payload.longitude)
+            sq = _parse_rules(payload)
             if sq is None:
                 raise HTTPException(
                     503,
-                    f"AI inference server недоступен, а запрос не распознан шаблонами: {exc}",
+                    "AI inference server недоступен, а запрос не распознан шаблонами: "
+                    "попробуйте переформулировать или повторите позже",
                 ) from exc
             fallback_used = True
         except AIQueryError as exc:
-            raise HTTPException(422, f"Запрос не прошёл валидацию (§25): {exc}") from exc
+            # детали (какая именно модель ошиблась) — в лог, пользователю — подсказка
+            logger.warning("Разбор запроса не удался: %s", exc)
+            raise HTTPException(422, PARSE_FAILED_HINT) from exc
 
     limit = min(sq.limit, settings.max_limit)
     categories = sq.categories or None
@@ -149,7 +225,11 @@ def ai_query(
         }
 
     if sq.action == "recommend":
-        lat, lon, place = _resolve_target(db, settings, sq, payload.latitude, payload.longitude)
+        user_lat, user_lon = _pick_coords(
+            None, None, payload.latitude, payload.longitude,
+            payload.map_latitude, payload.map_longitude,
+        )
+        lat, lon, place = _resolve_target(db, settings, sq, user_lat, user_lon)
         result = run_recommend(
             db, settings,
             query_text=sq.text or payload.query,
@@ -171,8 +251,11 @@ def ai_query(
         }
 
     # --- прочие действия: нужны координаты для пространственных -------------
-    lat = sq.latitude if sq.latitude is not None else payload.latitude
-    lon = sq.longitude if sq.longitude is not None else payload.longitude
+    lat, lon = _pick_coords(
+        sq.latitude, sq.longitude,
+        payload.latitude, payload.longitude,
+        payload.map_latitude, payload.map_longitude,
+    )
     place_info = None
     if sq.place:
         lat, lon, place_info = _resolve_target(db, settings, sq, lat, lon)
@@ -189,7 +272,10 @@ def ai_query(
 
     elif sq.action == "search":
         if not sq.text:
-            raise HTTPException(422, "Для поиска не задан текст (text)")
+            # схема это уже чинит (search без текста -> nearby/list), до сюда
+            # доходим только в бесперспективном случае
+            logger.warning("action=search без text: %s", sq.model_dump())
+            raise HTTPException(422, PARSE_FAILED_HINT)
         items, total = q.text_search(
             db, sq.text, categories=categories, limit=limit, lat=lat, lon=lon
         )
@@ -197,17 +283,13 @@ def ai_query(
 
     elif sq.action in ("nearby", "radius_search"):
         if lat is None or lon is None:
-            raise HTTPException(
-                422,
-                "Не задана точка отсчёта: укажите место («рядом с Дворцовой площадью») "
-                "или передайте координаты пользователя",
-            )
+            raise HTTPException(422, NO_ORIGIN_HINT)
         radius = sq.radius_meters or (1000.0 if sq.action == "nearby" else None)
         if radius is None:
             raise HTTPException(422, "Для поиска в радиусе не задан radius_meters")
         if radius > settings.max_radius_meters:
             raise HTTPException(400, f"Радиус больше допустимого ({settings.max_radius_meters:.0f} м)")
-        items, total = q.radius_objects(
+        items, total, _in_radius = q.radius_objects(
             db, lat, lon, radius, categories=categories, limit=limit,
         )
         where_label = f"«{place_info['label']}»" if place_info else "заданной точки"
@@ -249,10 +331,15 @@ def recommend(
     if payload.query and not available(settings):
         raise HTTPException(503, "AI inference server недоступен для семантики")
 
-    # место из текста («недалеко от Невского проспекта») -> центр для spatial (§26).
-    # Явные координаты пользователя имеют приоритет.
-    lat, lon, place = payload.latitude, payload.longitude, None
-    if payload.query and (lat is None or lon is None):
+    # Точка отсчёта: место из текста («недалеко от Невского проспекта») важнее
+    # геолокации — иначе при включённом GPS запрос про Невский отработает от
+    # пользователя. Дальше — координаты пользователя, затем точка на карте.
+    lat, lon = _pick_coords(
+        None, None, payload.latitude, payload.longitude,
+        payload.map_latitude, payload.map_longitude,
+    )
+    place = None
+    if payload.query:
         name = _place_from_text(payload.query)
         if name:
             try:

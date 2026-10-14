@@ -60,17 +60,28 @@ SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Ку�
 1. «музеи», «памятники», «мемориалы», «галереи» (и их сочетания) -> action="list",
    categories=[...]. Используй коды: museum, monument, memorial, gallery.
 2. «найди X», «поищи X», «где X» (без пространства) -> action="search", text="X".
-3. «рядом с X», «возле X», «вокруг X», «что рядом с X» -> action="nearby" или
-   "radius_search" (если задан радиус) и place="X".
+   action="search" допустим ТОЛЬКО при непустом text. Если текста нет, а есть
+   место — nearby; если есть категории — list.
+3. «рядом с X», «возле X», «вокруг X», «что рядом с X», «ближайший ... к X» ->
+   action="nearby" или "radius_search" (если задан радиус) и place="X".
 4. «в радиусе N метров/метрах от X» -> action="radius_search", place="X",
    radius_meters=N.
 5. «статистика», «сколько объектов», «какие категории» -> action="statistics".
 6. «порекомендуй», «посоветуй», «что посмотреть», «подбери» -> action="recommend".
-7. Если координаты пользователя переданы в запросе, используй их как есть.
-   НИКОГДА не выдумывай координаты: для точек отсчёта ставь place.
-8. Не придумывай поля: отсутствующие значения -> null.
-9. limit по умолчанию 20; radius_meters не больше 10000.
-10. Запрос НЕ о объектах, местах, расстояниях и рекомендациях сервиса
+7. НИКОГДА не выдумывай координаты. Для точки отсчёта ставь place, для
+   пользователя — координаты из сообщения, как есть.
+8. Пересечение/угол улиц — это place, сохрани исходные названия:
+   «пересечение Пестеля и Моховой» -> place="пересечение Пестеля и Моховой".
+   Не разбирай такое место сам: координаты посчитает сервис.
+9. «здесь», «тут», «отсюда», «эта точка», «выбранная точка», «центр карты» ->
+   latitude/longitude из строки «Координаты выбранной на карте точки» (если она
+   есть в сообщении), place=null. Если такой строки нет — координаты пользователя.
+10. «с детьми», «для детей», «с семьёй», «детский» — это не поиск и не
+   категория: nearby/recommend с указанным place, categories оставляй только
+    явно названные.
+11. Не придумывай поля: отсутствующие значения -> null.
+12. limit по умолчанию 20; radius_meters не больше 10000.
+13. Запрос НЕ о объектах, местах, расстояниях и рекомендациях сервиса
     (погода, политика, переводы, программирование, математика, новости,
     общие разговоры) -> action="other", остальные поля null. Не пытайся
     притянуть такой запрос к list/search/statistics: лучше честный отказ,
@@ -79,6 +90,19 @@ SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Ку�
     2+2?», «Расскажи анекдот». Примеры НЕ -> other (это про карту):
     «Сколько музеев в Центральном районе?», «Что посмотреть рядом?».
 
+Примеры (формат ответа):
+«Какой музей ближе всего к Дворцовой площади?» ->
+{"action":"nearby","categories":["museum"],"place":"Дворцовая площадь","radius_meters":1000,"limit":5}
+«Покажи все галереи в радиусе 1 км от Невского проспекта» ->
+{"action":"radius_search","categories":["gallery"],"place":"Невский проспект","radius_meters":1000,"limit":20}
+«Чем заняться с детьми рядом с Эрмитажем?» ->
+{"action":"nearby","categories":[],"place":"Эрмитаж","radius_meters":1500}
+«Ближайшая галерея к пересечению улиц Пестеля и Моховой» ->
+{"action":"nearby","categories":["gallery"],"place":"пересечение Пестеля и Моховой","radius_meters":1500,"limit":5}
+«Сколько музеев в Центральном районе?» ->
+{"action":"list","categories":["museum"],"within_district":true,"limit":100}
+«Какая погода завтра?» -> {"action":"other"}
+
 Ответ — только JSON без каких-либо пояснений и без markdown."""
 
 
@@ -86,19 +110,29 @@ class AIQueryError(RuntimeError):
     """Некорректный результат разбора (пользователю отдаём 422, §25)."""
 
 
-def build_user_message(query: str, user_lat: float | None, user_lon: float | None) -> str:
+def build_user_message(query: str, user_lat: float | None, user_lon: float | None,
+                       map_lat: float | None = None, map_lon: float | None = None) -> str:
     parts = [f"Запрос пользователя: {query}"]
     if user_lat is not None and user_lon is not None:
         parts.append(f"Координаты пользователя: {user_lat}, {user_lon}")
+    if map_lat is not None and map_lon is not None:
+        parts.append(f"Координаты выбранной на карте точки: {map_lat}, {map_lon}")
     parts.append("Верни только JSON.")
     return "\n".join(parts)
 
 
 def parse_query(settings: Settings, query: str,
                 user_lat: float | None = None,
-                user_lon: float | None = None) -> StructuredQuery:
+                user_lon: float | None = None,
+                *,
+                map_lat: float | None = None,
+                map_lon: float | None = None) -> StructuredQuery:
     """Текст -> валидный StructuredQuery. Ошибки -> AIQueryError (422)."""
-    raw = chat(settings, SYSTEM_PROMPT, build_user_message(query, user_lat, user_lon))
+    raw = chat(
+        settings,
+        SYSTEM_PROMPT,
+        build_user_message(query, user_lat, user_lon, map_lat, map_lon),
+    )
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -119,15 +153,23 @@ def parse_query(settings: Settings, query: str,
 
 def parse_with_fallback(settings: Settings, query: str,
                         user_lat: float | None = None,
-                        user_lon: float | None = None) -> StructuredQuery:
+                        user_lon: float | None = None,
+                        *,
+                        map_lat: float | None = None,
+                        map_lon: float | None = None) -> StructuredQuery:
     """Одна повторная попытка разбора с сообщением об ошибке модели (§24).
 
     Повтор делается ТОЛЬКО когда модель ответила, но неверно (AIQueryError).
     Недоступность inference server (LLMError) сразу пробрасывается наружу —
     иначе клиент получил бы 422 вместо 503 (§44) и ждал бы два таймаута.
+
+    После неудачного повтора наружу уходит дружелюбная формулировка: технические
+    детали (что именно не так со схемой) остаются в логе.
     """
+    common = {"user_lat": user_lat, "user_lon": user_lon,
+              "map_lat": map_lat, "map_lon": map_lon}
     try:
-        return parse_query(settings, query, user_lat, user_lon)
+        return parse_query(settings, query, **common)
     except LLMError:
         raise
     except AIQueryError as first:
@@ -136,10 +178,10 @@ def parse_with_fallback(settings: Settings, query: str,
                 settings,
                 f"{query}\n\nПредыдущая попытка была неудачной ({first}). "
                 "Соблюдай схему строго.",
-                user_lat,
-                user_lon,
+                **common,
             )
         except LLMError:
             raise
         except AIQueryError as second:
-            raise AIQueryError(str(second)) from second
+            logger.warning("Разбор не удался после повтора: %s", second)
+            raise AIQueryError("не удалось разобрать запрос") from second

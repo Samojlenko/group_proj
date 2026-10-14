@@ -92,8 +92,20 @@ class StructuredQuery(BaseModel):
 
     @model_validator(mode="after")
     def _radius_default(self) -> "StructuredQuery":
-        """LLM часто выбирает radius_search, забывая радиус: берём разумный
-        дефолт 1000 м вместо ошибки (значение всё равно валидируется выше)."""
+        """Нормализация после разбора: дефолты и починка типовых ошибок LLM.
+
+        LLM нередко выбирает action="search" без text («чем заняться с детьми
+        рядом с Эрмитажем») — вместо ошибки превращаем это в осмысленный запрос:
+        есть место -> nearby, есть категории -> list. Иначе — ValueError (→
+        повтор, §24, и дружелюбный отказ наружу).
+        """
+        if self.action == "search" and not self.text:
+            if self.place:
+                self.action = "nearby"
+            elif self.categories:
+                self.action = "list"
+            else:
+                raise ValueError("для поиска не задан текст (text)")
         if self.action == "radius_search" and self.radius_meters is None:
             self.radius_meters = 1000.0
         if self.action == "nearby" and self.radius_meters is None:

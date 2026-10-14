@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { CATEGORY_LABELS } from "../constants";
 import type { GeoJsonFeature } from "../types";
 import type { Focus } from "../App";
 
@@ -87,6 +88,17 @@ export default function CulturalMap({
   handlersRef.current = { onSelect, onMapClick, clickMode };
   const featureIndexRef = useRef<Map<number, GeoJsonFeature>>(new Map());
   featureIndexRef.current = new Map(features.map((f) => [f.id, f]));
+
+  const markerByIdRef = useRef<Map<number, L.CircleMarker>>(new Map());
+  const markerColorRef = useRef<Map<number, string>>(new Map());
+  /** последнее расстояние, вписанное в popup — чтобы не перерисовывать зря */
+  const popupDistRef = useRef<Map<number, number | undefined>>(new Map());
+  /** актуальные selectedId/focus внутри персистентных эффектов */
+  const styleRef = useRef<{ selectedId: number | null; focus: Focus | null }>({
+    selectedId: null,
+    focus: null,
+  });
+  styleRef.current = { selectedId, focus };
 
   // инициализация карты (один раз)
   useEffect(() => {
@@ -184,29 +196,12 @@ export default function CulturalMap({
     }
   }, [district]);
 
-  // маркеры объектов + popup (§19)
-  useEffect(() => {
-    const group = markersRef.current;
-    if (!group) return;
-    group.clearLayers();
-    const focusIds = new Set(focus?.ids ?? []);
-    for (const f of features) {
-      const [lon, lat] = f.geometry.coordinates;
-      const selected = f.id === selectedId;
-      const inFocus = focusIds.has(f.id);
-      const marker = L.circleMarker([lat, lon], {
-        radius: selected ? 10 : inFocus ? 8 : 6,
-        color: selected ? "#ffffff" : categoryColor(f.properties.category),
-        weight: selected || inFocus ? 3 : 1.5,
-        fillColor: categoryColor(f.properties.category),
-        fillOpacity: inFocus || selected ? 1 : 0.75,
-      });
-      marker.bindTooltip(f.properties.name, { direction: "top", opacity: 0.9 });
-
-      // popup с деталями и ссылкой на подробности (§19)
-      const dist = focus?.distances?.[f.id];
-      const catLabel = f.properties.category;
-      const popupHtml = `
+  // popup с деталями и ссылкой на подробности (§19).
+  // Категория показывается русским языком: «Галереи», а не код "gallery".
+  const popupHtml = (f: GeoJsonFeature): string => {
+    const dist = styleRef.current.focus?.distances?.[f.id];
+    const catLabel = CATEGORY_LABELS[f.properties.category] ?? f.properties.category;
+    return `
         <div class="map-popup">
           <div class="popup-head">
             <span class="dot" style="background:${categoryColor(f.properties.category)}"></span>
@@ -218,17 +213,87 @@ export default function CulturalMap({
           ${dist && dist > 0 ? `<div class="popup-row">Расстояние: <b>${fmtDist(dist)}</b></div>` : ""}
           <button class="btn popup-details" data-id="${f.id}">Подробнее →</button>
         </div>`;
-      marker.bindPopup(popupHtml, { maxWidth: 260 });
+  };
+
+  /**
+   * Точечная покраска маркеров: радиус/цвет по выбранному объекту и фокусу.
+   *
+   * Раньше здесь же пересоздавались маркеры — любое выделение сбрасывало
+   * слой вместе с открытым popup, из-за чего приходилось кликать дважды.
+   */
+  const applyStyles = () => {
+    const { selectedId: sel, focus: fc } = styleRef.current;
+    const focusIds = new Set(fc?.ids ?? []);
+    markerByIdRef.current.forEach((marker, id) => {
+      const isSel = id === sel;
+      const inFocus = focusIds.has(id);
+      const color = markerColorRef.current.get(id) ?? "#94a3b8";
+      marker.setStyle({
+        radius: isSel ? 10 : inFocus ? 8 : 6,
+        color: isSel ? "#ffffff" : color,
+        weight: isSel || inFocus ? 3 : 1.5,
+        fillColor: color,
+        fillOpacity: inFocus || isSel ? 1 : 0.75,
+      });
+      // расстояние в popup обновляем только когда оно реально изменилось
+      const dist = fc?.distances?.[id];
+      if (popupDistRef.current.get(id) !== dist) {
+        popupDistRef.current.set(id, dist);
+        const f = featureIndexRef.current.get(id);
+        if (f) marker.setPopupContent(popupHtml(f));
+      }
+    });
+  };
+
+  // маркеры объектов + popup (§19): создаём один раз на набор features
+  useEffect(() => {
+    const group = markersRef.current;
+    if (!group) return;
+    group.clearLayers();
+    markerByIdRef.current.clear();
+    markerColorRef.current.clear();
+    popupDistRef.current.clear();
+    for (const f of features) {
+      const [lon, lat] = f.geometry.coordinates;
+      const color = categoryColor(f.properties.category);
+      const marker = L.circleMarker([lat, lon], {
+        radius: 6,
+        color,
+        weight: 1.5,
+        fillColor: color,
+        fillOpacity: 0.75,
+        // клик по маркеру не должен перетекать в клик по карте:
+        // в режиме радиуса он съезжал бы центр поиска
+        bubblingMouseEvents: false,
+      });
+      marker.bindTooltip(f.properties.name, { direction: "top", opacity: 0.9 });
+      marker.bindPopup(popupHtml(f), { maxWidth: 260 });
       marker.on("popupopen", (e) => {
-        const el = (e.popup.getElement() as HTMLElement | undefined)?.querySelector(
-          ".popup-details",
-        ) as HTMLButtonElement | null;
-        if (el) el.onclick = () => handlersRef.current.onSelect(f.id);
+        const root = e.popup.getElement();
+        if (!root || root.dataset.bound === "1") return;
+        // делегирование: контент popup меняется (обновление расстояния),
+        // а слушатель висит на контейнере и переживает эти замены
+        root.dataset.bound = "1";
+        root.addEventListener("click", (ev) => {
+          const btn = (ev.target as HTMLElement).closest(".popup-details");
+          if (btn) handlersRef.current.onSelect(f.id);
+        });
       });
       marker.on("click", () => handlersRef.current.onSelect(f.id));
       marker.addTo(group);
+      markerByIdRef.current.set(f.id, marker);
+      markerColorRef.current.set(f.id, color);
+      popupDistRef.current.set(f.id, styleRef.current.focus?.distances?.[f.id]);
     }
-  }, [features, selectedId, focus]);
+    applyStyles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [features]);
+
+  // выделение: меняем стиль, а не слой — открытый popup переживает выбор
+  useEffect(() => {
+    applyStyles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, focus]);
 
   // фокус-слой: выделение лучшего результата + линии расстояний (§39)
   useEffect(() => {

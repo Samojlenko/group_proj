@@ -14,6 +14,11 @@ class AIQueryRequest(BaseModel):
     latitude: float | None = Field(default=None, ge=-90, le=90,
                                     description="Координаты пользователя")
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    map_latitude: float | None = Field(
+        default=None, ge=-90, le=90,
+        description="Точка, выбранная пользователем на карте (центр радиуса)",
+    )
+    map_longitude: float | None = Field(default=None, ge=-180, le=180)
     session_id: str | None = Field(default=None, description="Идентификатор диалога (§40)")
 
 
@@ -38,6 +43,9 @@ class RecommendRequest(BaseModel):
     categories: list[str] | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    map_latitude: float | None = Field(default=None, ge=-90, le=90,
+                                        description="Точка, выбранная на карте")
+    map_longitude: float | None = Field(default=None, ge=-180, le=180)
     radius_meters: float | None = Field(default=None, gt=0, le=10000)
     limit: int = Field(default=10, ge=1, le=100)
 

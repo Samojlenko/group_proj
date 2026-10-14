@@ -34,9 +34,14 @@ _LIMIT_RE = re.compile(r"(?:первые|ближайшие|топ|найди|п
 
 _NEARBY_RE = re.compile(
     r"рядом\s+с|возле|вокруг|около|недалеко\s+от|ближе\s+всего\s+к|"
-    r"по\s+близости\s+от|рядом|по\s+близости",
+    r"ближайш\w*|по\s+близости\s+от|рядом|по\s+близости",
     re.IGNORECASE,
 )
+# «пересечение Пестеля и Моховой», «пересечению улиц Пестеля и Моховой», «угол A и B»
+_INTERSECTION_RE = re.compile(
+    r"(?:пересечени\w*|угл\w*)\s+(?:улиц\w*\s+)?(.+)$", re.IGNORECASE
+)
+_PAIR_SPLIT_RE = re.compile(r"\s+и\s+", re.IGNORECASE)
 _RECOMMEND_RE = re.compile(
     r"рекоменд|посовет|подбер|что\s+посмотр|что\s+интересн|хочу\s+посмотр|по\s+совету",
     re.IGNORECASE,
@@ -111,6 +116,44 @@ def _find_place(text: str) -> str | None:
     return place
 
 
+# «здесь», «эта точка», «выбранная точка» — точка отсчёта пришла с карты
+_DEICTIC_RE = re.compile(
+    r"здесь|тут|отсюда|туда|сюда|"
+    r"эта\s+точка|этой\s+точки|этой\s+точке|этой\s+метк\w*|"
+    r"у\s+точки|от\s+точки|у\s+метки|моей\s+точке|поставленн\w*\s+точк\w*|"
+    r"выбранн\w*\s+точк\w*|выбранн\w*\s+мест\w*|указанн\w*\s+точк\w*|"
+    r"центре\s+карты|по\s+центру\s+карты|той\s+точке",
+    re.IGNORECASE,
+)
+
+
+def is_deictic(text: str) -> bool:
+    """Пользователь ссылается на точку, которую сам поставил на карте.
+
+    Нужно API (app/api/ai.py): при таком запросе точка с карты важнее
+    геолокации браузера — иначе «что здесь?» всегда считается от GPS-координат,
+    а не от того места, куда человек ткнул мышкой.
+    """
+    return bool(_DEICTIC_RE.search(text or ""))
+
+
+def _find_intersection(text: str) -> str | None:
+    """«пересечению улиц Пестеля и Моховой» → «пересечение Пестеля и Моховой».
+
+    Канонический префикс «пересечение» нужен резолверу: он вычисляет точку по
+    геометрии двух улиц в PostGIS (§45), а не ищет её по имени.
+    """
+    m = _INTERSECTION_RE.search(text)
+    if not m:
+        return None
+    body = m.group(1).strip().strip("«»\"'(),.?!")
+    parts = [p.strip(" «»\"'(),.?!") for p in _PAIR_SPLIT_RE.split(body)]
+    parts = [p for p in parts if len(p) >= 3]
+    if len(parts) != 2:
+        return None
+    return f"пересечение {parts[0]} и {parts[1]}"
+
+
 def _find_limit(text: str) -> int | None:
     m = _LIMIT_RE.search(text)
     if not m:
@@ -120,19 +163,29 @@ def _find_limit(text: str) -> int | None:
 
 
 def parse_rules(query: str, user_lat: float | None = None,
-                user_lon: float | None = None) -> StructuredQuery | None:
+                user_lon: float | None = None,
+                map_lat: float | None = None,
+                map_lon: float | None = None) -> StructuredQuery | None:
     """Простые шаблоны русского языка → StructuredQuery.
 
     Возвращает None, если запрос не распознан (тогда вызывающая сторона
     отдаёт контролируемую ошибку 422 с просьбой уточнить, §31).
+
+    ``map_lat/map_lon`` — точка, выбранная пользователем на карте: она
+    используется для указательных форм («здесь», «эта точка»).
     """
     text = query.strip()
     categories = _find_categories(text)
     radius = _find_radius(text)
     limit = _find_limit(text) or 20
     coords = _find_coords(text)
+    deictic = is_deictic(text)
 
     base: dict = {"limit": limit}
+
+    # «здесь»/«эта точка» — карта важнее геолокации: пользователь явно ткнул
+    if deictic and map_lat is not None and map_lon is not None:
+        coords = (map_lat, map_lon)
 
     # статистика
     if _STAT_RE.search(text) and not _RECOMMEND_RE.search(text):
@@ -157,6 +210,17 @@ def parse_rules(query: str, user_lat: float | None = None,
     # координаты пользователя имеют приоритет над «эта точка»
     if coords:
         base.update({"latitude": coords[0], "longitude": coords[1]})
+
+    # пересечение улиц: место, которое считает PostGIS по геометрии (§45)
+    intersection = _find_intersection(text)
+    if intersection:
+        base.update({
+            "action": "radius_search" if radius else "nearby",
+            "categories": categories or [],
+            "place": intersection,
+            "radius_meters": radius or 1500.0,
+        })
+        return _validate(base)
 
     # радиусный поиск (само наличие радиуса — достаточный признак)
     if radius is not None:

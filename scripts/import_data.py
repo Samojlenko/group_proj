@@ -73,14 +73,16 @@ def import_district(cur) -> int:
 
 
 def import_locations(cur) -> int:
-    """locations.json (улицы/площади из OSM/Wikidata) + landmarks.json (ориентиры).
+    """locations.json (улицы/площади из OSM/Wikidata) + landmarks.json (ориентиры)
+    + streets.json (улицы, собранные build_local_streets.py из локальных тайлов).
 
-    Дубликаты по имени пропускаются: landmarks дополняет, а не заменяет.
+    Дубликаты по имени пропускаются: каждый следующий файл дополняет, а не
+    заменяет предыдущий.
     """
     seen: set[str] = set()
     count = 0
     cur.execute("DELETE FROM locations")
-    for fname in ("locations.json", "landmarks.json"):
+    for fname in ("locations.json", "landmarks.json", "streets.json"):
         path = PROCESSED / fname
         if not path.exists():
             print(f"Нет data/processed/{fname} — пропускаем")

@@ -89,12 +89,23 @@ export function getHealth(): Promise<Health> {
   return request<Health>("/health");
 }
 
-export function getCategories(): Promise<CategoryInfo[]> {
-  return request<CategoryInfo[]>("/categories");
+export function getCategories(
+  filters: ObjectFilters = {},
+  signal?: AbortSignal,
+): Promise<CategoryInfo[]> {
+  return request<CategoryInfo[]>(
+    `/categories${toQuery({ not_keyword: filters.not_keyword })}`,
+    { signal },
+  );
 }
 
-export function getStatistics(): Promise<Statistics> {
-  return request<Statistics>("/statistics");
+export function getStatistics(
+  filters: ObjectFilters = {},
+  signal?: AbortSignal,
+): Promise<Statistics> {
+  return request<Statistics>(`/statistics${toQuery({ not_keyword: filters.not_keyword })}`, {
+    signal,
+  });
 }
 
 // --- объекты (§11–§17) -------------------------------------------------------
@@ -125,7 +136,13 @@ export function getRadius(
   latitude: number,
   longitude: number,
   radiusMeters: number,
-  opts: { category?: string[]; limit?: number } = {},
+  opts: {
+    category?: string[];
+    limit?: number;
+    offset?: number;
+    /** исключить объекты с ключевым словом (доски), чтобы список совпадал с картой */
+    not_keyword?: string;
+  } = {},
   signal?: AbortSignal,
 ): Promise<RadiusResponse> {
   return request(
@@ -135,6 +152,8 @@ export function getRadius(
       radius_meters: radiusMeters,
       category: opts.category,
       limit: opts.limit,
+      offset: opts.offset,
+      not_keyword: opts.not_keyword,
     })}`,
     { signal },
   );
@@ -171,11 +190,17 @@ export interface AIQueryPayload {
   query: string;
   latitude?: number | null;
   longitude?: number | null;
+  /** точка, выбранная пользователем на карте (центр радиуса) */
+  map_latitude?: number | null;
+  map_longitude?: number | null;
   session_id?: string | null;
 }
 
-export function aiQuery(payload: AIQueryPayload): Promise<import("../types").AIQueryResponse> {
-  return request(`/query`, { method: "POST", body: JSON.stringify(payload) });
+export function aiQuery(
+  payload: AIQueryPayload,
+  signal?: AbortSignal,
+): Promise<import("../types").AIQueryResponse> {
+  return request(`/query`, { method: "POST", body: JSON.stringify(payload), signal });
 }
 
 export interface RecommendPayload {
@@ -183,12 +208,17 @@ export interface RecommendPayload {
   categories?: string[];
   latitude?: number | null;
   longitude?: number | null;
+  map_latitude?: number | null;
+  map_longitude?: number | null;
   radius_meters?: number | null;
   limit?: number;
 }
 
-export function recommend(payload: RecommendPayload): Promise<import("../types").RecommendResponse> {
-  return request(`/recommend`, { method: "POST", body: JSON.stringify(payload) });
+export function recommend(
+  payload: RecommendPayload,
+  signal?: AbortSignal,
+): Promise<import("../types").RecommendResponse> {
+  return request(`/recommend`, { method: "POST", body: JSON.stringify(payload), signal });
 }
 
 // --- аналитика (§36–§38) ------------------------------------------------------
