@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # шаблонного объяснения; при сбое — шаблон; у резюме свой короткий таймаут
     ai_summary_enabled: bool = True
     ai_summary_timeout_seconds: float = 20.0
+    # структурированный вывод (идея 20): разбор идёт с JSON-схемой в format —
+    # грамматика декодера гарантирует форму ответа; выключение — простой JSON
+    ai_structured_output: bool = True
+    # повторы разбора при невалидном ответе модели (идея 21), сверх первой попытки
+    ai_parse_retries: int = 1
 
     # --- Картография / геокодирование ---
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"

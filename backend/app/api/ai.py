@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.ai import sessions
 from app.ai import summary as ai_summary
+from app.ai import unrecognized
 from app.ai.agent import AgentError, run_agent
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
@@ -37,6 +38,8 @@ from app.schemas.ai_schemas import (
     RecommendRequest,
     RecommendResponse,
     RecommendedItem,
+    UnrecognizedItem,
+    UnrecognizedResponse,
 )
 from app.spatial import queries as q
 from app.spatial.routes import WALK_SPEED_M_PER_MIN, build_walk_route
@@ -324,6 +327,8 @@ def _execute(
 
     # запрос вне зоны компетенции сервиса: внятный отказ вместо пустого списка
     if sq.action == "other":
+        # журнал «не понял» (идея 23): видно, о чём спрашивают вне темы сервиса
+        unrecognized.add("other", source_query or payload.query)
         return {
             "action": "other",
             "explanation": (
@@ -800,6 +805,8 @@ def _run_query(
         except AIQueryError as exc:
             # детали (какая именно модель ошиблась) — в лог, пользователю — подсказка
             logger.warning("Разбор запроса не удался: %s", exc)
+            # журнал «не понял» (идея 23): формулировку не спас даже повтор
+            unrecognized.add("unparsed", payload.query, str(exc))
             raise HTTPException(422, PARSE_FAILED_HINT) from exc
 
     # помечаем, что запрос разобран шаблонами, а не моделью (§53)
@@ -807,6 +814,10 @@ def _run_query(
 
     result = _execute(db, settings, payload, sq,
                       source_query=payload.query, fallback_note=fallback_note)
+
+    if fallback_used:
+        # журнал «не понял» (идея 23): модель недоступна, спасли шаблоны (§53)
+        unrecognized.add("fallback", payload.query, "запрос разобран шаблонами")
 
     _remember(session, payload.query, result)
 
@@ -896,6 +907,39 @@ def ai_query_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get(
+    "/unrecognized",
+    response_model=UnrecognizedResponse,
+    summary="Журнал «не понял»: что помощник не разобрал (идея 23)",
+)
+def unrecognized_log(
+    limit: int = Query(50, ge=1, le=200),
+    kind: str | None = Query(
+        default=None, description="Фильтр по поводу: other / fallback / unparsed"
+    ),
+) -> dict:
+    """Последние запросы, на которых помощник спасовал (свежие первыми).
+
+    Журнал в памяти процесса: ``other`` — модель отказалась (вопрос вне темы),
+    ``fallback`` — запрос спасён шаблонами без модели (§53), ``unparsed`` —
+    разбор не удался даже после повторов. Подробности каждой записи — в логе
+    сервиса; здесь — сами формулировки, чтобы понимать, чему помощника учить.
+    """
+    if kind is not None and kind not in unrecognized.KIND_LABELS:
+        raise HTTPException(400, "Неизвестный повод: допустимы other, fallback, unparsed")
+    items: list[dict] = []
+    for entry in unrecognized.recent(limit, kind=kind):
+        item = UnrecognizedItem(
+            **entry, kind_label=unrecognized.KIND_LABELS.get(entry["kind"], entry["kind"])
+        )
+        items.append(item.model_dump())
+    return {
+        "total": unrecognized.total(),
+        "counts": unrecognized.counts(),
+        "items": items,
+    }
 
 
 @router.post(

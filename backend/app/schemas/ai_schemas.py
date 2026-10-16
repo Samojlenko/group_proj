@@ -69,6 +69,24 @@ class AIQueryResponse(BaseModel):
     )
 
 
+class UnrecognizedItem(BaseModel):
+    """Одна запись журнала «не понял» (идея 23)."""
+
+    time: str = Field(description="Момент записи (UTC, ISO)")
+    kind: str = Field(description="Повод: other / fallback / unparsed")
+    kind_label: str = Field(default="", description="Человекочитаемый повод")
+    query: str = Field(description="Исходный запрос пользователя")
+    detail: str = Field(default="", description="Детали (ошибка схемы и т.п.)")
+
+
+class UnrecognizedResponse(BaseModel):
+    """Журнал запросов, которые помощник не понял (идея 23)."""
+
+    total: int = Field(description="Сколько записей в журнале (в памяти процесса)")
+    counts: dict[str, int] = Field(description="Записи по поводам")
+    items: list[UnrecognizedItem]
+
+
 class RecommendRequest(BaseModel):
     """Параметры рекомендации (§30)."""
 

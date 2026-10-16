@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 
 from pydantic import ValidationError
 
@@ -21,18 +22,46 @@ logger = logging.getLogger(__name__)
 # единый клиент AI (app/ai/client.py); LLMError — прежнее имя исключения
 LLMError = client.AIServiceUnavailable
 
+# верхняя граница повторов (идея 21): модель либо исправляется со второго-третьего
+# раза, либо это уже не «случайная» ошибка формата
+_MAX_PARSE_RETRIES = 3
+
+
+@lru_cache(maxsize=1)
+def _output_schema() -> dict:
+    """JSON-схема StructuredQuery для structured outputs (идея 20)."""
+    return StructuredQuery.model_json_schema()
+
+
+def normalize_query(query: str) -> str:
+    """Нормализация текста запроса перед разбором (идея 22).
+
+    Лишние пробелы, переводы строк и отступы не должны мешать кэшу (§46):
+    одинаковые по смыслу формулировки дают одно и то же сообщение модели,
+    и повтор берётся из кэша, не тратя вызов inference server.
+    """
+    return " ".join(query.split())
+
 
 def chat(settings: Settings, system: str, user: str, *, json_mode: bool = True,
          temperature: float = 0.0) -> str:
-    """Один запрос к модели: system + user -> текст ответа (§22)."""
+    """Один запрос к модели: system + user -> текст ответа (§22).
+
+    При ``AI_STRUCTURED_OUTPUT=true`` (по умолчанию) вместе с запросом уходит
+    JSON-схема разбора: форму ответа гарантирует грамматика декодера, а не
+    надежда на послушность модели (идея 20).
+    """
     del temperature  # temperature=0 задана в client.chat_completion
+    fmt: bool | dict = json_mode
+    if json_mode and settings.ai_structured_output:
+        fmt = _output_schema()
     return client.chat_completion(
         settings,
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        json_format=json_mode,
+        json_format=fmt,
     )
 
 SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Культурная карта Санкт-Петербурга».
@@ -181,6 +210,7 @@ def parse_query(settings: Settings, query: str,
     ``context`` — предыдущий разбор диалога (§40): модель использует его
     только для уточняющих фраз, самостоятельные запросы разбирает как есть.
     """
+    query = normalize_query(query)
     raw = chat(
         settings,
         SYSTEM_PROMPT,
@@ -211,31 +241,34 @@ def parse_with_fallback(settings: Settings, query: str,
                         map_lat: float | None = None,
                         map_lon: float | None = None,
                         context: str | None = None) -> StructuredQuery:
-    """Одна повторная попытка разбора с сообщением об ошибке модели (§24).
+    """Разбор с повторами при неверном ответе модели (§24, идея 21).
 
-    Повтор делается ТОЛЬКО когда модель ответила, но неверно (AIQueryError).
-    Недоступность inference server (LLMError) сразу пробрасывается наружу —
-    иначе клиент получил бы 422 вместо 503 (§44) и ждал бы два таймаута.
+    Число повторов задаёт ``AI_PARSE_RETRIES`` (по умолчанию один, максимум
+    три): модель получает сообщение о конкретной ошибке схемы и шанс
+    исправиться. Повторы делаются ТОЛЬКО когда модель ответила, но неверно
+    (AIQueryError). Недоступность inference server (LLMError) сразу
+    пробрасывается наружу — иначе клиент получил бы 422 вместо 503 (§44)
+    и ждал бы лишние таймауты.
 
-    После неудачного повтора наружу уходит дружелюбная формулировка: технические
-    детали (что именно не так со схемой) остаются в логе.
+    После последней неудачной попытки наружу уходит дружелюбная формулировка:
+    технические детали (что именно не так со схемой) остаются в логе.
     """
+    query = normalize_query(query)
     common = {"user_lat": user_lat, "user_lon": user_lon,
               "map_lat": map_lat, "map_lon": map_lon, "context": context}
-    try:
-        return parse_query(settings, query, **common)
-    except LLMError:
-        raise
-    except AIQueryError as first:
+    retries = min(max(int(settings.ai_parse_retries), 0), _MAX_PARSE_RETRIES)
+    last_error: AIQueryError | None = None
+    for attempt in range(1, retries + 2):
+        text = query if attempt == 1 else (
+            f"{query}\n\nПредыдущая попытка была неудачной ({last_error}). "
+            "Соблюдай схему строго и верни только JSON."
+        )
         try:
-            return parse_query(
-                settings,
-                f"{query}\n\nПредыдущая попытка была неудачной ({first}). "
-                "Соблюдай схему строго.",
-                **common,
-            )
+            return parse_query(settings, text, **common)
         except LLMError:
             raise
-        except AIQueryError as second:
-            logger.warning("Разбор не удался после повтора: %s", second)
-            raise AIQueryError("не удалось разобрать запрос") from second
+        except AIQueryError as exc:
+            last_error = exc
+            logger.info("Попытка разбора %s/%s не удалась: %s", attempt, retries + 1, exc)
+    logger.warning("Разбор не удался после %s попыток: %s", retries + 1, last_error)
+    raise AIQueryError("не удалось разобрать запрос") from last_error

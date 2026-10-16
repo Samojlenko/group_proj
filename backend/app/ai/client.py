@@ -92,10 +92,15 @@ def chat_completion(
     settings: Settings,
     messages: list[dict],
     *,
-    json_format: bool = True,
+    json_format: bool | dict = True,
     timeout: float | None = None,
 ) -> str:
     """Одно сообщение модели через Ollama /api/chat. Возвращает текст ответа.
+
+    ``json_format``: ``True`` — простой JSON-режим (``"format": "json"``);
+    словарь — структурированный вывод (идея 20): Ollama строит грамматику по
+    JSON-схеме, и модель физически не может вернуть другую форму. Если сервер
+    схемы не принял (старая версия), тихо уходим на простой JSON-режим.
 
     Идентичные запросы обслуживаются из кэша (§46) — повторный ввод того же
     текста не приводит к повторному вызову модели.
@@ -110,13 +115,25 @@ def chat_completion(
         "options": {"temperature": 0.0},
     }
     if json_format:
-        payload["format"] = "json"
+        payload["format"] = json_format if isinstance(json_format, dict) else "json"
     try:
         resp = httpx.post(
             f"{settings.ai_base_url.rstrip('/')}/api/chat",
             json=payload,
             timeout=_timeout(settings, timeout),
         )
+        if isinstance(json_format, dict) and resp.status_code in (400, 422):
+            # сервер не умеет structured outputs — деградация к простому JSON
+            logger.warning(
+                "AI server не принял JSON-схему (HTTP %s) — простой JSON-режим",
+                resp.status_code,
+            )
+            payload["format"] = "json"
+            resp = httpx.post(
+                f"{settings.ai_base_url.rstrip('/')}/api/chat",
+                json=payload,
+                timeout=_timeout(settings, timeout),
+            )
     except httpx.HTTPError as exc:
         raise AIServiceUnavailable(f"AI server недоступен: {exc}") from exc
     if resp.status_code >= 500:
