@@ -145,7 +145,9 @@ def test_query_other_action_returns_refusal(monkeypatch):
     from app.main import app
 
     get_settings.cache_clear()
-    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, ai_enabled=True)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, ai_enabled=True, ai_agent_enabled=False
+    )
     monkeypatch.setattr(ai_api, "available", lambda s: True)
     monkeypatch.setattr(
         ai_api, "parse_with_fallback",

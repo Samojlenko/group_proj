@@ -154,6 +154,32 @@ function refinementChips(result: AIQueryResponse): { label: string; query: strin
   return chips;
 }
 
+/** Русские подписи инструментов агента (function calling, идея 10). */
+const AGENT_TOOL_LABELS: Record<string, string> = {
+  find_objects: "поиск объектов",
+  find_place: "точка на карте",
+  distance: "расстояние",
+  compare: "сравнение",
+  walk: "прогулка",
+  analytics: "аналитика по годам",
+  statistics: "статистика",
+  recommend: "подбор",
+};
+
+/** Шаги агента: сколько инструментов он вызвал и каких (§22, идея 10). */
+function agentSteps(result: AIQueryResponse): string[] {
+  const raw = (result.structured as { agent_steps?: { tool?: string }[] }).agent_steps;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s) => AGENT_TOOL_LABELS[s?.tool ?? ""] ?? s?.tool ?? "?").filter(Boolean);
+}
+
+/** Русская форма числа для «шаг»: 2 шага, 5 шагов. */
+function pluralSteps(n: number): string {
+  if (n % 10 === 1 && n % 100 !== 11) return "шаг";
+  if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return "шага";
+  return "шагов";
+}
+
 /**
  * AI-помощник (§31): диалог на естественном языке -> структурированный запрос (§25)
  * и гибридные рекомендации (§30). Показывает, как сервис понял запрос,
@@ -334,6 +360,7 @@ export default function AIPanel({
 
   const hasAnswer = result !== null || recs !== null;
   const refinements = result ? refinementChips(result) : [];
+  const steps = result ? agentSteps(result) : [];
 
   return (
     <aside className="ai-panel">
@@ -430,6 +457,15 @@ export default function AIPanel({
       {result && (
         <section className="ai-result">
           <p className="ai-explanation">{result.explanation}</p>
+
+          {/* многошаговый агент (function calling): видно, какие инструменты
+              он вызвал — «аналитика по годам → поиск объектов» */}
+          {steps.length > 1 && (
+            <p className="muted ai-agent-steps">
+              <span aria-hidden="true">✦</span> Агент: {steps.length} {pluralSteps(steps.length)} —{" "}
+              {steps.join(" → ")}
+            </p>
+          )}
 
           {/* на отказ (action=other) не показываем «ничего не найдено» —
               explanation уже объясняет, чем сервис может помочь; у distance

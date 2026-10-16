@@ -103,6 +103,41 @@ def chat_completion(settings: Settings, messages: list[dict], *, json_format: bo
     return content
 
 
+def chat_tools(settings: Settings, messages: list[dict], tools: list[dict]) -> dict:
+    """Вызов модели с инструментами — function calling (идея 10).
+
+    Возвращает message-объект ответа ``{"content": str, "tool_calls": [...]}``:
+    либо модель просит исполнить инструменты, либо отвечает текстом.
+    Кэш здесь не используется: результат зависит от всей истории диалога
+    с инструментами, а она у каждого запроса своя.
+    """
+    payload: dict = {
+        "model": settings.ai_model,
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+        "options": {"temperature": 0.0},
+    }
+    try:
+        resp = httpx.post(
+            f"{settings.ai_base_url.rstrip('/')}/api/chat",
+            json=payload,
+            timeout=settings.ai_timeout_seconds,
+        )
+        # 500+ и 4xx (модель без поддержки tools) — сервис, а не пользователь:
+        # наверх уходит AIServiceUnavailable, вызывающий код откатывается (§53)
+        if resp.status_code >= 500:
+            raise AIServiceUnavailable(f"AI server вернул {resp.status_code}")
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise AIServiceUnavailable(f"AI server недоступен: {exc}") from exc
+    message = resp.json().get("message") or {}
+    return {
+        "content": message.get("content") or "",
+        "tool_calls": message.get("tool_calls") or [],
+    }
+
+
 def embed(settings: Settings, text: str) -> list[float]:
     """Эмбеддинг текста через inference server (§27, кэш §46)."""
     if not settings.ai_enabled:

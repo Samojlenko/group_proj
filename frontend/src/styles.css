@@ -1466,6 +1466,16 @@ path.leaflet-interactive {
   margin: 0;
 }
 
+/* многошаговый агент (function calling): какие инструменты он вызвал */
+.ai-agent-steps {
+  margin: 0;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
 .ai-tags {
   display: flex;
   flex-wrap: wrap;

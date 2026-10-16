@@ -138,7 +138,9 @@ def client(monkeypatch):
 
     sessions.store.clear_all()
     get_settings.cache_clear()
-    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, ai_enabled=True)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, ai_enabled=True, ai_agent_enabled=False
+    )
     # по умолчанию — путь правил (LLM недоступен): уточнения не зависят от модели
     monkeypatch.setattr(ai_api, "available", lambda s: False)
     yield TestClient(app, raise_server_exceptions=False)

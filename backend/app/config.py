@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     ai_model: str = "qwen2.5:7b"
     embedding_model: str = "nomic-embed-text"
     ai_timeout_seconds: float = 60.0
+    # агент с function calling (идея 10): многошаговые вопросы через инструменты;
+    # при любом сбое — тихий откат на обычный одиночный разбор (§53)
+    ai_agent_enabled: bool = True
+    ai_agent_max_steps: int = 5
 
     # --- Картография / геокодирование ---
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"

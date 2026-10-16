@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.ai import sessions
+from app.ai.agent import AgentError, run_agent
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
 from app.ai.hours import is_open_now
@@ -613,6 +614,45 @@ def _execute(
     }
 
 
+def _remember(session: sessions.Session, query: str, result: dict) -> None:
+    """Помним состоявшийся обмен (§40): без этого «а теперь только музеи» и
+    «покажи ещё» не к чему прицепить. Отказы (other) не запоминаются."""
+    if result["action"] == "other":
+        return
+    sessions.store.remember(session, sessions.Turn(
+        query=query,
+        structured=result["structured"],
+        action=result["action"],
+        item_ids=[i["id"] for i in result["items"]],
+        total=result["total"],
+        shown=len(result["items"]),
+    ))
+
+
+def _try_agent(
+    db: Session, settings: Settings, payload: AIQueryRequest, last: sessions.Turn | None
+) -> dict | None:
+    """Многошаговый агент (function calling, идея 10): сложные вопросы вроде
+    «самый старый музей и что рядом с ним» решаются цепочкой инструментов.
+
+    Любой сбой — недоступность сервера, отказ модели, ошибки всех шагов —
+    означает тихий откат на обычный разбор (§53): агент это надстройка,
+    а не новый обязательный путь обработки.
+    """
+    context = None
+    if last is not None:
+        context = json.dumps(
+            {"query": last.query, "parsed": last.structured}, ensure_ascii=False
+        )
+    try:
+        return run_agent(db, settings, payload, context=context, execute=_execute)
+    except AgentError as exc:
+        logger.info("Агент не справился, обычный разбор: %s", exc)
+    except LLMError as exc:
+        logger.warning("Агент: LLM недоступен (%s), обычный разбор", exc)
+    return None
+
+
 def _run_refinement(
     db: Session,
     settings: Settings,
@@ -710,6 +750,15 @@ def ai_query(
         result["session_id"] = session.id
         return result
 
+    # Многошаговый агент (идея 10): включается только когда модель доступна;
+    # самостоятельный маршрут для одиночных вопросов не отличается от обычного.
+    if settings.ai_agent_enabled and available(settings):
+        agent_result = _try_agent(db, settings, payload, last)
+        if agent_result is not None:
+            _remember(session, payload.query, agent_result)
+            agent_result["session_id"] = session.id
+            return agent_result
+
     fallback_used = False
     if not available(settings):
         # сервер недоступен или модель не загружена — не тратим таймаут LLM
@@ -760,17 +809,7 @@ def ai_query(
     result = _execute(db, settings, payload, sq,
                       source_query=payload.query, fallback_note=fallback_note)
 
-    # Помним состоявшийся обмен: без этого «а теперь только музеи» и «покажи
-    # ещё» не к чему прицепить (§40).
-    if result["action"] != "other":
-        sessions.store.remember(session, sessions.Turn(
-            query=payload.query,
-            structured=sq.model_dump(),
-            action=result["action"],
-            item_ids=[i["id"] for i in result["items"]],
-            total=result["total"],
-            shown=len(result["items"]),
-        ))
+    _remember(session, payload.query, result)
 
     result["session_id"] = session.id
     return result
