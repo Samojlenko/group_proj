@@ -55,6 +55,20 @@ def _stem(word: str) -> str:
     return w
 
 
+def _word_hit(a: str, b: str) -> bool:
+    """Слова совпали, если совпали основы или одна — префикс другой.
+
+    «Русского» ~ «русский» (общая основа «русск»), «музея» ~ «музей»
+    (префикс «музе»): так двухсловные названия требуют совпадения всей
+    фразы, а не одного слова — иначе «Русского музея» находит «Русский
+    Левша» и подобных однофамильцев.
+    """
+    sa, sb = _stem(a), _stem(b)
+    if sa == sb:
+        return True
+    return len(sa) >= 4 and len(sb) >= 4 and (sa.startswith(sb) or sb.startswith(sa))
+
+
 def _rank(needle: str, name: str) -> int:
     """Чем меньше, тем лучше совпадение; 99 — не совпало."""
     n = _normalize(needle)
@@ -63,12 +77,13 @@ def _rank(needle: str, name: str) -> int:
         return 0
     if c.startswith(n) or n.startswith(c):
         return 1
-    # сравнение по стемам слов: «Эрмитажем» ~ «Государственный Эрмитаж»,
-    # «на Невском» ~ «Невский проспект»
-    ns = {_stem(w) for w in n.split()}
-    cs = {_stem(w) for w in c.split()}
-    if ns & cs:
-        return 2
+    # сравнение по словам: «Эрмитажем» ~ «Государственный Эрмитаж»
+    nw, cw = n.split(), c.split()
+    matched = sum(1 for w in nw if any(_word_hit(w, x) for x in cw))
+    if matched:
+        # совпали все слова запроса — крепкое совпадение; только часть —
+        # слабое («Русского музея» и «Русский Левша»: общее лишь «русск»)
+        return 2 if matched == len(nw) else 4
     if n in c or c in n:
         return 3
     return 99
@@ -95,9 +110,15 @@ def _lookup(db: Session, sql: str, needle: str) -> dict | None:
         ).mappings().all()
 
     best: tuple[int, int, dict] | None = None
+    multiword = len(needle.split()) > 1
     for row in rows:
         r = _rank(needle, row["name"])
         if r == 99:
+            continue
+        if r == 4 and multiword:
+            # многословный запрос, совпало лишь одно слово: это, скорее всего,
+            # не то место («Русского музея» → «Русский Левша») — лучше поискать
+            # дальше (улицы, ориентиры) или честно не найти
             continue
         key = (r, len(row["name"]))
         if best is None or key < best[:2]:
@@ -188,7 +209,7 @@ def resolve_place(db: Session, settings: Settings, name: str) -> dict:
     # 1) культурные объекты
     row = _lookup(
         db,
-        "SELECT name, latitude, longitude, 'cultural_object' AS source "
+        "SELECT id, name, latitude, longitude, 'cultural_object' AS source "
         "FROM cultural_objects",
         needle,
     )
@@ -198,6 +219,8 @@ def resolve_place(db: Session, settings: Settings, name: str) -> dict:
             "longitude": row["longitude"],
             "label": row["name"],
             "source": row["source"],
+            # id нужен интентам «расстояние» и «сравнение»: им требуются карточки
+            "object_id": row["id"],
         }
 
     # 2) пересечения улиц («пересечение Пестеля и Моховой») — PostGIS (§45).

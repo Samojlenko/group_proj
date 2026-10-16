@@ -432,3 +432,68 @@ def statistics(db: Session, *, not_keyword: str | None = None) -> dict:
         "bbox": dict(extent) if extent and extent["min_lon"] is not None else None,
         "updated_at": updated["updated_at"],
     }
+
+
+def distance_between_points(
+    db: Session, lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """Геодезическое расстояние между двумя точками, метры (§45).
+
+    Считает PostGIS на сфере (`geography`), а не «пифагор по градусам»:
+    Python только передаёт точки — единый источник геометрии.
+    """
+    row = _run(
+        db,
+        "SELECT ST_Distance(CAST(:p1 AS geography), CAST(:p2 AS geography)) AS d",
+        {
+            "p1": f"SRID=4326;POINT({lon1} {lat1})",
+            "p2": f"SRID=4326;POINT({lon2} {lat2})",
+        },
+    )[0]
+    return float(row["d"])
+
+
+def objects_by_ids(db: Session, ids: list[int]) -> dict[int, dict]:
+    """Карточки объектов по списку id (порядок задаёт вызывающий код).
+
+    Нужен прогулке: остановки маршрута известны по id, а показать нужно полные
+    карточки — в порядке обхода, а не в порядке ответа SQL.
+    """
+    if not ids:
+        return {}
+    rows = _run(
+        db,
+        f"SELECT {OBJ_COLS} FROM cultural_objects c WHERE c.id = ANY(:ids)",
+        {"ids": list(ids)},
+    )
+    return {r["id"]: dict(r) for r in rows}
+
+
+def objects_by_year(
+    db: Session,
+    *,
+    categories: list[str] | None = None,
+    not_keyword: str | None = None,
+    newest: bool = False,
+    limit: int = 5,
+) -> list[dict]:
+    """Аналитика «самый старый/новый»: крайние годы основания (§36).
+
+    Сортировку выполняет SQL; объекты без года в выборку не попадают — иначе
+    «самый старый» оказался бы объектом «неизвестно какого» возраста.
+    """
+    where, params = _plain_filters(categories=categories, not_keyword=not_keyword)
+    cond = "c.year_established IS NOT NULL"
+    sql_where = f"{where} AND {cond}" if where else f"WHERE {cond}"
+    order = "DESC" if newest else "ASC"
+    rows = _run(
+        db,
+        f"""
+        SELECT {OBJ_COLS} FROM cultural_objects c
+        {sql_where}
+        ORDER BY c.year_established {order}, c.name
+        LIMIT :limit
+        """,
+        {**params, "limit": limit},
+    )
+    return [dict(r) for r in rows]

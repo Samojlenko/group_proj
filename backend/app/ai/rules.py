@@ -49,6 +49,87 @@ _RECOMMEND_RE = re.compile(
 _STAT_RE = re.compile(r"сколько\s+(?:всего\s+)?(объект|музе|памятник)|статистик|распределени|категори", re.IGNORECASE)
 _SEARCH_RE = re.compile(r"^\s*(?:найди|поищи|где|выдай|ищи)\b", re.IGNORECASE)
 
+# --- интенты этапа B: расстояние, сравнение, прогулка, аналитика -----------
+
+# «сколько идти от A до B», «расстояние между A и B», «как далеко от A до B»
+_DISTANCE_RE = re.compile(
+    r"расстоян\w*|как\s+далеко|(?<![а-яё])далеко\s+ли|"
+    r"сколько\s+(?:идти|ехать|метров|километров|км)",
+    re.IGNORECASE,
+)
+# «сравни A и B», «чем отличается A от B», «разница между A и B»
+_COMPARE_RE = re.compile(r"сравни\w*|сравнени\w*|отлича\w*|разниц\w*", re.IGNORECASE)
+# «прогулка», «погулять час», «маршрут пешком», «что успеть за два часа»
+_WALK_RE = re.compile(
+    r"прогулк\w*|погуля\w*|пойти\s+пешком|пройтись|"
+    r"маршрут\s+(?:пешком|для\s+прогулки|прогулки)|"
+    r"что\s+успеть|успею\s+за",
+    re.IGNORECASE,
+)
+# «самый старый памятник», «старейший музей»
+_OLDEST_RE = re.compile(r"сам\w+\s+(?:стары|древн)\w*|старейш\w*|древнейш\w*", re.IGNORECASE)
+# «самый новый памятник», «самый молодой музей»
+_NEWEST_RE = re.compile(r"сам\w+\s+(?:нов|молод)\w*|новейш\w*", re.IGNORECASE)
+# «открыто сейчас», «какие музеи сейчас открыты»
+_OPEN_RE = re.compile(
+    r"открыт\w*|работающ\w*|работает\s+сейчас|работают\s+сейчас", re.IGNORECASE
+)
+
+# «от A до B», «между A и B» — пара мест для расстояния
+_PAIR_UNTIL_RE = re.compile(r"\b(?:от|между)\s+(.+?)\s+(?:до|и)\s+(.+)", re.IGNORECASE)
+# «сравни A и B», «чем отличается A от B»
+_PAIR_COMPARE_RE = re.compile(
+    r"(?:сравни\w*|сравнени\w*|отлич\w*|разниц\w*)\s+(?:между\s+)?(.+?)\s+и\s+(.+)",
+    re.IGNORECASE,
+)
+
+# «на час», «30 минут», «2 часа», «полтора часа»
+_DURATION_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(минут\w*|мин\b|час\w*|ч\b)", re.IGNORECASE
+)
+_NUMBER_WORDS = {"два": 120, "две": 120, "три": 180, "четыре": 240}
+
+
+def _clean_place(raw: str) -> str | None:
+    """Название места из пары: без кавычек и хвостовой пунктуации."""
+    s = raw.strip().strip("«»\"'(),.!?;:").strip()
+    return s if len(s) >= 3 else None
+
+
+def _find_pair(text: str) -> tuple[str, str] | None:
+    """Два места из фразы: «от A до B», «между A и B», «сравни A и B»."""
+    for pattern in (_PAIR_UNTIL_RE, _PAIR_COMPARE_RE):
+        m = pattern.search(text)
+        if m:
+            a, b = _clean_place(m.group(1)), _clean_place(m.group(2))
+            if a and b and a.lower() != b.lower():
+                return a, b
+    return None
+
+
+def _find_duration(text: str) -> int | None:
+    """Время прогулки в минутах: «на час», «30 минут», «полтора часа», «два часа»."""
+    low = text.lower().replace("ё", "е")
+    if "полтора часа" in low:
+        return 90
+    if "полчаса" in low or "пол часа" in low:
+        return 30
+    m = _DURATION_RE.search(low)
+    if m:
+        value = _to_number(m.group(1))
+        unit = m.group(2)
+        minutes = value * 60 if unit.startswith(("час", "ч")) else value
+        return min(max(round(minutes), 5), 240)
+    m = re.search(r"(два|две|три|четыре)\s+часа", low)
+    if m:
+        minutes = _NUMBER_WORDS[m.group(1)]
+        if "с половиной" in m.group(0):
+            minutes += 30
+        return min(minutes, 240)
+    if re.search(r"(?<![а-яё])час(?:а|ов)?(?![а-яё])", low):
+        return 60
+    return None
+
 # предлоги, после которых начинается название места
 _PLACE_RE = re.compile(
     r"(?:рядом\s+с|возле|вокруг|около|недалеко\s+от|ближе\s+всего\s+к|от|к|по)\s+"
@@ -182,6 +263,8 @@ def parse_rules(query: str, user_lat: float | None = None,
     deictic = is_deictic(text)
 
     base: dict = {"limit": limit}
+    # «открыто сейчас» — общий фильтр к пространственным и списковым веткам
+    open_now = True if _OPEN_RE.search(text) else None
 
     # «здесь»/«эта точка» — карта важнее геолокации: пользователь явно ткнул
     if deictic and map_lat is not None and map_lon is not None:
@@ -193,6 +276,42 @@ def parse_rules(query: str, user_lat: float | None = None,
                      "within_district": bool(_find_categories(text)) and "район" in text.lower()})
         return _validate(base)
 
+    # расстояние между двумя местами («сколько от Эрмитажа до Русского музея»)
+    if _DISTANCE_RE.search(text):
+        pair = _find_pair(text)
+        if pair:
+            base.update({"action": "distance", "place": pair[0], "place2": pair[1],
+                         "categories": categories or []})
+            return _validate(base)
+
+    # сравнение двух объектов («сравни Эрмитаж и Русский музей»)
+    if _COMPARE_RE.search(text):
+        pair = _find_pair(text)
+        if pair:
+            base.update({"action": "compare", "place": pair[0], "place2": pair[1],
+                         "categories": categories or []})
+            return _validate(base)
+
+    # прогулка («погулять час от Дворцовой площади», «что успеть за два часа»)
+    if _WALK_RE.search(text):
+        base.update({
+            "action": "walk",
+            "categories": categories or [],
+            "place": _find_place(text),
+            "radius_meters": radius,
+            "duration_minutes": _find_duration(text),
+        })
+        if coords:
+            base.update({"latitude": coords[0], "longitude": coords[1], "place": None})
+        return _validate(base)
+
+    # аналитика: «самый старый/новый ...» по году основания
+    if _OLDEST_RE.search(text) or _NEWEST_RE.search(text):
+        metric = "newest" if _NEWEST_RE.search(text) and not _OLDEST_RE.search(text) else "oldest"
+        base.update({"action": "analytics", "metric": metric,
+                     "categories": categories or [], "limit": min(limit, 10)})
+        return _validate(base)
+
     # рекомендации
     if _RECOMMEND_RE.search(text):
         place = _find_place(text)
@@ -202,6 +321,7 @@ def parse_rules(query: str, user_lat: float | None = None,
             "text": _strip_boilerplate(text),
             "place": place,
             "radius_meters": radius,
+            "open_now": open_now,
         })
         if coords:
             base.update({"latitude": coords[0], "longitude": coords[1], "place": None})
@@ -230,6 +350,7 @@ def parse_rules(query: str, user_lat: float | None = None,
             "categories": categories or [],
             "radius_meters": radius,
             "place": None if coords else place,
+            "open_now": open_now,
         })
         return _validate(base)
 
@@ -241,6 +362,7 @@ def parse_rules(query: str, user_lat: float | None = None,
             "categories": categories or [],
             "radius_meters": radius or 1000.0,
             "place": None if coords else place,
+            "open_now": open_now,
         })
         if not place and not coords:
             # нет точки отсчёта — просим уточнить (§31), но возвращаем структуру
@@ -249,14 +371,14 @@ def parse_rules(query: str, user_lat: float | None = None,
 
     # просто перечисление категорий («музеи», «покажи галереи»)
     if categories and not _SEARCH_RE.search(text):
-        base.update({"action": "list", "categories": categories})
+        base.update({"action": "list", "categories": categories, "open_now": open_now})
         return _validate(base)
 
     # «найди X» → полнотекстовый поиск
     stripped = _SEARCH_RE.sub("", text).strip()
     if stripped and len(stripped) >= 2:
         base.update({"action": "search", "text": stripped,
-                     "categories": categories or []})
+                     "categories": categories or [], "open_now": open_now})
         return _validate(base)
 
     return None
@@ -344,6 +466,14 @@ def _radius_only(text: str) -> float | None:
     return radius
 
 
+# «а теперь открытые», «только открытые сейчас» — фильтр к прошлой выдаче
+_OPEN_ONLY_RE = re.compile(
+    r"^\s*(?:а\s+)?(?:теперь\s+|только\s+|оставь\s+)?"
+    r"(?:открыт\w*(?:\s+сейчас)?|сейчас\s+открыт\w*|работающ\w+)\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+
 def detect_refinement(text: str) -> dict | None:
     """Уточнение к прошлому ответу или None, если запрос самостоятельный.
 
@@ -377,6 +507,9 @@ def detect_refinement(text: str) -> dict | None:
     if radius:
         return {"kind": "radius", "radius": radius}
 
+    if _OPEN_ONLY_RE.match(t):
+        return {"kind": "open_now"}
+
     return None
 
 
@@ -398,6 +531,9 @@ def merge_refinement(previous: dict, refinement: dict) -> dict:
         if data.get("action") in ("list", "search", "recommend"):
             has_origin = bool(data.get("place")) or data.get("latitude") is not None
             data["action"] = "radius_search" if has_origin else "nearby"
+    elif kind == "open_now":
+        # «а теперь открытые»: фильтр часов к прошлой выдаче
+        data["open_now"] = True
     # «more» и «nth» структуру не меняют: ими управляет API-слой
 
     return data

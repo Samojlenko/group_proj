@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.ai import sessions
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
+from app.ai.hours import is_open_now
 from app.ai.parser import AIQueryError, parse_with_fallback
 from app.ai.recommend import recommend as run_recommend
 from app.ai.resolver import PlaceNotFound, resolve_place
@@ -35,6 +36,7 @@ from app.schemas.ai_schemas import (
     RecommendedItem,
 )
 from app.spatial import queries as q
+from app.spatial.routes import WALK_SPEED_M_PER_MIN, build_walk_route
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["ai"])
@@ -203,6 +205,98 @@ def _continuation_note(offset: int, got: int, total: int, cap: int) -> str:
     return " — больше объектов нет"
 
 
+# единственное число для сравнений: «оба музей» читалось бы плохо,
+# поэтому в предложении используем «музей/памятник/...» с учётом рода
+_CATEGORY_SINGULAR = {
+    "museum": "музей", "monument": "памятник",
+    "memorial": "мемориал", "gallery": "галерея",
+}
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русская форма числа: 1 остановка, 2 остановки, 5 остановок."""
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def _fmt_distance(meters: float) -> str:
+    """«1,2 км» / «350 м» — человеку читается лучше, чем «1234.5»."""
+    if meters >= 1000:
+        return f"{meters / 1000:.1f} км".replace(".", ",")
+    return f"{meters:.0f} м"
+
+
+def _resolve_pair(db: Session, settings: Settings, sq: StructuredQuery) -> tuple[dict, dict]:
+    """Два места для distance/compare: оба обязательны и должны найтись (§26)."""
+    if not sq.place or not sq.place2:
+        raise HTTPException(
+            422,
+            "Нужны два места — например: «сколько от Эрмитажа до Русского музея»",
+        )
+    resolved = []
+    for name in (sq.place, sq.place2):
+        try:
+            resolved.append(resolve_place(db, settings, name))
+        except PlaceNotFound as exc:
+            logger.info("Место пары не разрешилось: %s (%s)", name, exc)
+            raise HTTPException(422, f"«{name}» — {PLACE_NOT_FOUND_HINT}") from exc
+    return resolved[0], resolved[1]
+
+
+def _compare_text(a: dict, b: dict, meters: float) -> str:
+    """Человеческое сравнение двух объектов по данным карточек."""
+
+    def entry(o: dict) -> str:
+        bits = [_CATEGORY_SINGULAR.get(o["category"], o["category"])]
+        if o.get("year_established"):
+            bits.append(f"{o['year_established']} г.")
+        if o.get("is_free"):
+            bits.append("вход свободный")
+        elif o.get("ticket_price"):
+            bits.append(f"билет: {o['ticket_price']}")
+        return f"«{o['name']}» ({', '.join(bits)})"
+
+    parts = [f"{entry(a)} против {entry(b)}."]
+    ya, yb = a.get("year_established"), b.get("year_established")
+    if ya and yb and ya != yb:
+        older, newer = (a, b) if ya < yb else (b, a)
+        years = abs(ya - yb)
+        parts.append(
+            f"«{older['name']}» старше на {years} "
+            f"{_plural(years, 'год', 'года', 'лет')}."
+        )
+    if a.get("address") and b.get("address"):
+        parts.append(f"Адреса: {a['address']}; {b['address']}.")
+    walk_min = max(1, round(meters / WALK_SPEED_M_PER_MIN))
+    parts.append(f"Между ними — {_fmt_distance(meters)} (пешком ≈{walk_min} мин).")
+    return " ".join(parts)
+
+
+def _apply_open_now(items: list[dict], total: int, cap: int) -> tuple[list[dict], str]:
+    """Фильтр «открыто сейчас»: часы — текст, поэтому разбор идёт в Python.
+
+    Объекты без распознаваемых часов в выдачу не попадают (лучше промолчать,
+    чем показать закрытый музей), но в пояснении они честно посчитаны.
+    """
+    opened: list[dict] = []
+    unknown = 0
+    for it in items:
+        state = is_open_now(it.get("opening_hours") or it.get("working_hours"))
+        if state is True:
+            opened.append(it)
+        elif state is None:
+            unknown += 1
+    note = f"; открыто сейчас: {len(opened)} из {total} проверенных"
+    if total >= cap:
+        note += f" (проверены первые {cap})"
+    if unknown:
+        note += f", без распознанных часов: {unknown}"
+    return opened, note
+
+
 def _execute(
     db: Session,
     settings: Settings,
@@ -266,12 +360,18 @@ def _execute(
             limit=min(offset + limit, settings.max_limit),
             not_keyword=not_kw,
         )
-        items = result["items"][offset:]
         target = f" около «{place['label']}»" if place else ""
         explanation = (
             "Подобрано по гибридному скорингу (семантика + пространство + "
             f"категория){target}"
         )
+        items = result["items"]
+        if sq.open_now:
+            opened, hours_note = _apply_open_now(items, len(items), settings.max_limit)
+            items = opened[offset:]
+            explanation += hours_note
+        else:
+            items = items[offset:]
         explanation += _continuation_note(
             offset, len(items), len(items), settings.max_limit
         ) + fallback_note
@@ -286,6 +386,140 @@ def _execute(
             "offset": offset,
         }
 
+    # --- интенты этапа B: расстояние, сравнение, прогулка, аналитика --------
+
+    if sq.action in ("distance", "compare"):
+        a, b = _resolve_pair(db, settings, sq)
+        meters = q.distance_between_points(
+            db, a["latitude"], a["longitude"], b["latitude"], b["longitude"]
+        )
+        pair_objs = [
+            obj for info in (a, b)
+            if info.get("object_id")
+            and (obj := q.get_object(db, info["object_id"])) is not None
+        ]
+        if sq.action == "distance":
+            walk_min = max(1, round(meters / WALK_SPEED_M_PER_MIN))
+            explanation = (
+                f"От «{a['label']}» до «{b['label']}» — {_fmt_distance(meters)} "
+                f"по прямой (пешком примерно {walk_min} мин)"
+            )
+            items = pair_objs
+        else:
+            if len(pair_objs) != 2:
+                # одна из пар — улица или площадь: сравнивать карточки нельзя
+                missing = sq.place if not a.get("object_id") else sq.place2
+                raise HTTPException(
+                    422,
+                    f"«{missing}» — место на карте, а не объект сервиса: сравнивать "
+                    "можно музеи, памятники, мемориалы и галереи",
+                )
+            explanation = _compare_text(pair_objs[0], pair_objs[1], meters)
+            items = pair_objs
+        explanation += fallback_note
+        return {
+            "action": sq.action,
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": a,
+            "total": len(items),
+            "items": items,
+            "statistics": None,
+            "offset": 0,
+        }
+
+    if sq.action == "walk":
+        lat, lon = _origin(payload, sq)
+        place_info = None
+        if sq.place:
+            lat, lon, place_info = _resolve_target(db, settings, sq, lat, lon)
+        if lat is None or lon is None:
+            raise HTTPException(422, NO_ORIGIN_HINT)
+        route = build_walk_route(
+            db, lat, lon,
+            radius_m=sq.radius_meters or 1500.0,
+            count=sq.count or 6,
+            categories=categories,
+            not_keyword=not_kw,
+        )
+        by_id = q.objects_by_ids(db, [stop["id"] for stop in route["items"]])
+        items = []
+        for stop in route["items"]:
+            obj = by_id.get(stop["id"])
+            if obj:
+                # в списке рядом с названием — сколько уже пройдено от старта
+                items.append({**obj, "distance_meters": stop["cumulative_meters"]})
+        where_label = (
+            f"«{place_info['label']}»" if place_info else _origin_label(payload, lat, lon)
+        )
+        if items:
+            stops = len(items)
+            explanation = (
+                f"Прогулка от {where_label}: {stops} "
+                f"{_plural(stops, 'остановка', 'остановки', 'остановок')}, "
+                f"{_fmt_distance(route['total_meters'])}, "
+                f"примерно {route['walk_minutes']} мин пешком"
+            )
+            if sq.duration_minutes:
+                fits = route["walk_minutes"] <= sq.duration_minutes
+                explanation += (
+                    f" — в {sq.duration_minutes} мин укладывается" if fits
+                    else f" — за {sq.duration_minutes} мин не успеть"
+                )
+        else:
+            explanation = (
+                f"От {where_label} в радиусе {route['radius_meters']:.0f} м "
+                "не нашлось объектов для прогулки — попробуйте увеличить радиус"
+            )
+        explanation += fallback_note
+        return {
+            "action": "walk",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": place_info,
+            "total": len(items),
+            "items": items,
+            "statistics": None,
+            "offset": 0,
+            # маршрут целиком: остановки, полилиния и метры — рисуется на карте
+            "route": route,
+        }
+
+    if sq.action == "analytics":
+        metric = sq.metric or "oldest"
+        objs = q.objects_by_year(
+            db, categories=categories, not_keyword=not_kw,
+            newest=(metric == "newest"), limit=min(limit, 10),
+        )
+        if objs:
+            head = "Самый старый" if metric == "oldest" else "Самый новый"
+            first = objs[0]
+            explanation = (
+                f"{head} по году основания ({_labels(sq.categories).lower()}) — "
+                f"«{first['name']}» ({first['year_established']} г.)"
+            )
+            rest = ", ".join(
+                f"«{o['name']}» ({o['year_established']})" for o in objs[1:4]
+            )
+            if rest:
+                explanation += f"; далее: {rest}"
+        else:
+            explanation = (
+                "В базе нет данных о годах основания для этого запроса — "
+                "уточните категорию, например «самый старый музей»"
+            )
+        explanation += fallback_note
+        return {
+            "action": "analytics",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": None,
+            "total": len(objs),
+            "items": objs,
+            "statistics": None,
+            "offset": 0,
+        }
+
     # --- прочие действия: нужны координаты для пространственных -------------
     lat, lon = _origin(payload, sq)
     place_info = None
@@ -293,15 +527,24 @@ def _execute(
         lat, lon, place_info = _resolve_target(db, settings, sq, lat, lon)
 
     if sq.action == "list":
+        # при «открыто сейчас» нужен запас строк: часы разбираются в Python,
+        # часть объектов отсеется — страница всё равно должна быть полной
         items, total = q.list_objects(
             db, categories=categories, theme=sq.theme, keyword=sq.keyword,
             has_website=sq.has_website, has_description=sq.has_description,
-            within_district=sq.within_district, limit=limit, offset=offset,
+            within_district=sq.within_district,
+            limit=settings.max_limit if sq.open_now else limit,
+            offset=0 if sq.open_now else offset,
             lat=lat, lon=lon, not_keyword=not_kw,
         )
         explanation = f"Список объектов: {_labels(sq.categories)}"
         if sq.within_district:
             explanation += ", только Центральный район"
+        if sq.open_now:
+            opened, hours_note = _apply_open_now(items, total, settings.max_limit)
+            items = opened[offset:offset + limit]
+            total = len(opened)
+            explanation += hours_note
 
     elif sq.action == "search":
         if not sq.text:
@@ -310,13 +553,22 @@ def _execute(
             logger.warning("action=search без text: %s", sq.model_dump())
             raise HTTPException(422, PARSE_FAILED_HINT)
         # у text_search пока нет параметра offset — добираем и срезаем сами
-        fetch_limit = min(offset + limit, settings.max_limit)
+        fetch_limit = (
+            settings.max_limit if sq.open_now
+            else min(offset + limit, settings.max_limit)
+        )
         items, total = q.text_search(
             db, sq.text, categories=categories, not_keyword=not_kw,
             limit=fetch_limit, lat=lat, lon=lon,
         )
-        items = items[offset:]
         explanation = f"Полнотекстовый поиск по запросу «{sq.text}»"
+        if sq.open_now:
+            opened, hours_note = _apply_open_now(items, total, settings.max_limit)
+            items = opened[offset:offset + limit]
+            total = len(opened)
+            explanation += hours_note
+        else:
+            items = items[offset:]
 
     elif sq.action in ("nearby", "radius_search"):
         if lat is None or lon is None:
@@ -327,8 +579,10 @@ def _execute(
         if radius > settings.max_radius_meters:
             raise HTTPException(400, f"Радиус больше допустимого ({settings.max_radius_meters:.0f} м)")
         items, total, _in_radius = q.radius_objects(
-            db, lat, lon, radius, categories=categories, limit=limit,
-            offset=offset, not_keyword=not_kw,
+            db, lat, lon, radius, categories=categories,
+            limit=settings.max_limit if sq.open_now else limit,
+            offset=0 if sq.open_now else offset,
+            not_keyword=not_kw,
         )
         # человек должен видеть, откуда посчитано: «точки на карте» — это
         # та точка, которую он поставил, а не его геолокация
@@ -337,6 +591,11 @@ def _execute(
         )
         explanation = (f"Объекты в радиусе {radius:.0f} м от {where_label}"
                        f" ({_labels(sq.categories)})")
+        if sq.open_now:
+            opened, hours_note = _apply_open_now(items, total, settings.max_limit)
+            items = opened[offset:offset + limit]
+            total = len(opened)
+            explanation += hours_note
     else:  # pragma: no cover - Literal защищает от неизвестных действий
         raise HTTPException(422, f"Неизвестное действие: {sq.action}")
 

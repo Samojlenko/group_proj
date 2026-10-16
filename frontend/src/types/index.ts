@@ -146,6 +146,8 @@ export interface AIQueryResponse {
   offset?: number;
   /** диалог (§40): передайте со следующим запросом — заработают уточнения */
   session_id?: string | null;
+  /** пеший маршрут (заполняется для action="walk"): рисуется на карте */
+  route?: WalkRouteResponse | null;
 }
 
 /** Ответ POST /api/recommend (§30) */

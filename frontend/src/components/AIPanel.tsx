@@ -3,7 +3,12 @@ import { ApiError, aiQuery, recommend } from "../api/client";
 import type { Focus } from "../App";
 import { categoryColor } from "./CulturalMap";
 import { CATEGORY_LABELS } from "../constants";
-import type { AIQueryResponse, ObjectWithDistance, RecommendResponse } from "../types";
+import type {
+  AIQueryResponse,
+  ObjectWithDistance,
+  RecommendResponse,
+  WalkRouteResponse,
+} from "../types";
 
 interface Props {
   open: boolean;
@@ -11,6 +16,11 @@ interface Props {
   onSelect: (id: number) => void;
   /** показать результаты на карте: подсветка + центрирование (§39) */
   onFocus: (f: Focus | null) => void;
+  /**
+   * Прогулка из AI-ответа (action=walk): маршрут рисуется на карте тем же
+   * слоем, что и кнопка «Прогулка». null — снять маршрут, если он был от AI.
+   */
+  onWalkRoute?: (r: WalkRouteResponse | null) => void;
   latitude?: number | null;
   longitude?: number | null;
   /**
@@ -33,6 +43,9 @@ const DEMO_SCENARIOS: { title: string; query: string; recommend?: boolean }[] = 
     title: "Что у перекрёстка Пестеля и Моховой",
     query: "Что интересного есть на пересечении улиц Пестеля и Моховой?",
   },
+  { title: "Прогулка на час от Дворцовой", query: "Построй прогулку на час от Дворцовой площади" },
+  { title: "Сколько идти от Эрмитажа до Дворцовой", query: "Сколько идти от Эрмитажа до Дворцовой площади?" },
+  { title: "Самый старый памятник", query: "Самый старый памятник" },
   { title: "Интересное рядом со мной", query: "Что интересного можно посмотреть рядом с этой точкой?" },
   {
     title: "Подборка про русское искусство",
@@ -154,6 +167,7 @@ export default function AIPanel({
   onClose,
   onSelect,
   onFocus,
+  onWalkRoute,
   latitude,
   longitude,
   mapLatitude,
@@ -238,6 +252,10 @@ export default function AIPanel({
       setResult(res);
       // диалог продолжается: сервер запомнил контекст, уточнения идут по session_id (§40)
       setSessionId(res.session_id ?? null);
+      // прогулка (action=walk): рисуем маршрут на карте тем же слоем, что и
+      // кнопка «Прогулка»; на другие ответы просим снять только AI-маршрут
+      // (пользовательский, построенный вручную, App не тронет)
+      onWalkRoute?.(res.route ?? null);
       // подсвечиваем карту, только если есть что подсвечивать: у статистики
       // и отказа items пустые, и старая подсветка не должна гаснуть зря
       if (res.items.length > 0) {
@@ -310,6 +328,7 @@ export default function AIPanel({
     setAsked(null);
     setSessionId(null);
     onFocus(null);
+    onWalkRoute?.(null);
     inputRef.current?.focus();
   };
 
@@ -413,8 +432,9 @@ export default function AIPanel({
           <p className="ai-explanation">{result.explanation}</p>
 
           {/* на отказ (action=other) не показываем «ничего не найдено» —
-              explanation уже объясняет, чем сервис может помочь */}
-          {result.action !== "other" && result.total === 0 && (
+              explanation уже объясняет, чем сервис может помочь; у distance
+              пустые items нормальны: ответ в самом объяснении (метры и время) */}
+          {result.action !== "other" && result.action !== "distance" && result.total === 0 && (
             <p className="muted empty-state">Ничего не найдено — уточните запрос.</p>
           )}
 

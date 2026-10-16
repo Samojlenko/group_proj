@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.schemas.common import ObjectWithDistance
+from app.schemas.route_schemas import RouteResponse
 
 
 class AIQueryRequest(BaseModel):
@@ -47,6 +48,10 @@ class AIQueryResponse(BaseModel):
         default=None,
         description="Идентификатор диалога (§40): отправьте его со следующим запросом, "
         "чтобы работали уточнения («а теперь только музеи», «покажи ещё»)",
+    )
+    route: RouteResponse | None = Field(
+        default=None,
+        description="Пеший маршрут (action=walk): остановки, полилиния, метры и время",
     )
 
 

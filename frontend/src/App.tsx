@@ -141,6 +141,9 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
   // «Прогулка»: пеший маршрут от центра радиуса
   const [route, setRoute] = useState<WalkRouteResponse | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
+  /** маршрут построен AI-помощником (а не кнопкой «Прогулка»): только такой
+   * следующий AI-ответ без маршрута имеет право снять */
+  const aiRouteRef = useRef(false);
 
   const [aiOpen, setAiOpen] = useState(false);
   const [heatOn, setHeatOn] = useState(false);
@@ -445,12 +448,14 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
 
   // новый центр радиуса — старая прогулка больше не актуальна
   useEffect(() => {
+    aiRouteRef.current = false;
     setRoute(null);
   }, [radiusCenter]);
 
   const buildWalk = useCallback(
     (count: number) => {
       if (!radiusCenter) return;
+      aiRouteRef.current = false; // прогулку строит пользователь — маршрут его
       setRouteLoading(true);
       buildRoute({
         latitude: radiusCenter[0],
@@ -470,7 +475,23 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
     [radiusCenter, radiusMeters, filters.category, filters.not_keyword],
   );
 
-  const clearRoute = useCallback(() => setRoute(null), []);
+  const clearRoute = useCallback(() => {
+    aiRouteRef.current = false;
+    setRoute(null);
+  }, []);
+
+  // Маршрут от AI-помощника (action=walk): тот же слой карты, что у «Прогулки».
+  // null снимает маршрут только если он был от AI — прогулку, построенную
+  // вручную в сайдбаре, чужой запрос не должен стирать.
+  const handleAiRoute = useCallback((r: WalkRouteResponse | null) => {
+    if (r) {
+      aiRouteRef.current = true;
+      setRoute(r);
+    } else if (aiRouteRef.current) {
+      aiRouteRef.current = false;
+      setRoute(null);
+    }
+  }, []);
 
   const navigate = useNavigate();
   const openPage = useCallback((id: number) => navigate(`/object/${id}`), [navigate]);
@@ -655,6 +676,7 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
           onClose={() => setAiOpen(false)}
           onSelect={selectObject}
           onFocus={setAiFocus}
+          onWalkRoute={handleAiRoute}
           latitude={userLocation?.[0] ?? null}
           longitude={userLocation?.[1] ?? null}
           // точка, выбранная на карте: помощник должен уметь считать от неё

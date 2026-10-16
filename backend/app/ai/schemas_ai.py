@@ -30,7 +30,8 @@ class StructuredQuery(BaseModel):
     # "other" — запрос вне схемы (погода, переводы, свободный вопрос):
     # модель признаёт, что не может ответить, вместо выдуманного результата
     action: Literal["list", "nearby", "radius_search", "search",
-                    "statistics", "recommend", "other"] = "list"
+                    "statistics", "recommend", "other",
+                    "distance", "compare", "walk", "analytics"] = "list"
     categories: list[str] = Field(default_factory=list)
     text: str | None = Field(default=None, description="Текстовый запрос для поиска")
     theme: str | None = None
@@ -43,6 +44,18 @@ class StructuredQuery(BaseModel):
     has_website: bool | None = None
     has_description: bool | None = None
     within_district: bool = False
+    # --- интенты этапа B: расстояние, сравнение, прогулка, аналитика --------
+    place2: str | None = Field(default=None, description="Второе место («от A до B»)")
+    duration_minutes: int | None = Field(
+        default=None, description="Сколько времени на прогулку (walk), минуты"
+    )
+    open_now: bool | None = Field(
+        default=None, description="Оставить только объекты, открытые сейчас"
+    )
+    metric: Literal["oldest", "newest"] | None = Field(
+        default=None, description="Метрика аналитики: самый старый / самый новый"
+    )
+    count: int | None = Field(default=None, description="Остановок в прогулке (1..12)")
 
     @field_validator("categories", mode="before")
     @classmethod
@@ -65,7 +78,7 @@ class StructuredQuery(BaseModel):
                 out.append(code)
         return out
 
-    @field_validator("within_district", "has_website", "has_description", mode="before")
+    @field_validator("within_district", "has_website", "has_description", "open_now", mode="before")
     @classmethod
     def _boolish(cls, v):
         """Нормализация bool-полей: LLM нередко шлёт null/строку/0-1.
@@ -110,7 +123,53 @@ class StructuredQuery(BaseModel):
             self.radius_meters = 1000.0
         if self.action == "nearby" and self.radius_meters is None:
             self.radius_meters = 1000.0
+        if self.action in ("distance", "compare") and not (self.place and self.place2):
+            raise ValueError("для distance/compare нужны два места: place и place2")
+        if self.action == "walk":
+            # радиус = сколько можно пройти за названное время (80 м/мин),
+            # иначе дефолт как у кнопки «Прогулка» в интерфейсе
+            if self.duration_minutes is not None and self.radius_meters is None:
+                self.radius_meters = min(max(self.duration_minutes * 80.0, 600.0), 3000.0)
+            elif self.radius_meters is None:
+                self.radius_meters = 1500.0
+            if self.count is None:
+                # примерно 15 минут на остановку: короткая прогулка — меньше точек
+                self.count = min(max(round((self.duration_minutes or 90) / 15), 3), 12)
+        if self.action == "analytics" and self.metric is None:
+            self.metric = "oldest"
         return self
+
+    @field_validator("duration_minutes", mode="before")
+    @classmethod
+    def _duration(cls, v):
+        """LLM иногда шлёт строку/дроби — приводим к целым минутам (5..240)."""
+        if v is None:
+            return None
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"duration_minutes должно быть числом, получено {v!r}") from exc
+        if n <= 0:
+            raise ValueError("duration_minutes должен быть положительным")
+        return min(max(n, 5), 240)
+
+    @field_validator("count", mode="before")
+    @classmethod
+    def _count(cls, v):
+        if v is None:
+            return None
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"count должно быть числом, получено {v!r}") from exc
+        return min(max(n, 1), 12)
+
+    @field_validator("place", "place2", "theme", "keyword", mode="before")
+    @classmethod
+    def _strip_optional(cls, v):
+        if isinstance(v, str):
+            v = v.strip() or None
+        return v
 
     @field_validator("latitude")
     @classmethod
