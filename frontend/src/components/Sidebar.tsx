@@ -220,7 +220,11 @@ export default function Sidebar(props: Props) {
                 </button>
               ))}
             </div>
-            <p className="muted small-note">Кликните по карте, чтобы выбрать центр.</p>
+            <p className="muted small-note">
+              {hasCenter
+                ? "Центр выбран — кликните по карте, чтобы перенести его."
+                : "Кликните по карте, чтобы выбрать центр."}
+            </p>
 
             {/* «Прогулка»: пеший маршрут по ближайшим объектам от центра */}
             <div className="walk-controls">
