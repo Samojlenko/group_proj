@@ -4,6 +4,7 @@ import "leaflet/dist/leaflet.css";
 import { CATEGORY_LABELS } from "../constants";
 import type { GeoJsonFeature, WalkRouteResponse } from "../types";
 import type { Theme } from "../lib/theme";
+import { addThemeBasemap } from "../lib/basemap";
 import type { Focus } from "../App";
 
 /** Цвета маркеров по категориям (§6, §19). */
@@ -145,23 +146,11 @@ export default function CulturalMap({
     };
   }, []);
 
-  // подложка карты: CARTO в тон теме — тёмная и светлая
+  // подложка карты: Esri Gray Canvas в тон теме (тёмная/светлая)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    const url =
-      theme === "light"
-        ? "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-        : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
-    const layer = L.tileLayer(url, {
-      maxZoom: 19,
-      subdomains: "abcd",
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }).addTo(map);
-    return () => {
-      layer.remove();
-    };
+    return addThemeBasemap(map, theme);
   }, [theme]);
 
   // плагин тепловой карты ожидает глобальный L — загружаем динамически (§37)
