@@ -35,6 +35,7 @@ import type {
   WalkRouteResponse,
 } from "./types";
 import { loadFavorites, toggleFavorite, type Favorites } from "./lib/favorites";
+import { applyTheme, loadTheme, type Theme } from "./lib/theme";
 
 /** Что выделить на карте: результаты AI/поиска/радиуса (§38, §39). */
 export interface Focus {
@@ -57,28 +58,50 @@ export interface Focus {
  * `/object/:id` — отдельная страница объекта (§33).
  */
 export default function App() {
+  // тема живёт на верхнем уровне: её используют и карта, и страница объекта
+  const [theme, setTheme] = useState<Theme>(() => loadTheme());
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+  const toggleTheme = useCallback(
+    () => setTheme((t) => (t === "dark" ? "light" : "dark")),
+    [],
+  );
   return (
     <Routes>
-      <Route path="/object/:id" element={<ObjectShell />} />
-      <Route path="*" element={<MapShell />} />
+      <Route
+        path="/object/:id"
+        element={<ObjectShell theme={theme} onToggleTheme={toggleTheme} />}
+      />
+      <Route
+        path="*"
+        element={<MapShell theme={theme} onToggleTheme={toggleTheme} />}
+      />
     </Routes>
   );
 }
 
 /** Страница объекта (§33): держит состояние карты нетронутым под оверлеем. */
-function ObjectShell() {
+function ObjectShell({ theme, onToggleTheme }: ShellThemeProps) {
   const { id } = useParams();
   const navigate = useNavigate();
   return (
     <ObjectPage
       objectId={Number(id)}
+      theme={theme}
+      onToggleTheme={onToggleTheme}
       onBack={() => navigate(-1)}
       onOpen={(oid) => navigate(`/object/${oid}`)}
     />
   );
 }
 
-function MapShell() {
+interface ShellThemeProps {
+  theme: Theme;
+  onToggleTheme: () => void;
+}
+
+function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
   const [health, setHealth] = useState<Health | null>(null);
   /** первая проверка уже прошла — тогда «нет связи» не мигает при загрузке */
   const [healthChecked, setHealthChecked] = useState(false);
@@ -456,8 +479,25 @@ function MapShell() {
     <div className="app-layout">
       <header className="top-bar">
         <div className="brand">
-          <h1>Культурная карта</h1>
-          <span className="muted">Центральный район Санкт-Петербурга</span>
+          <span className="brand-logo" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              width="22"
+              height="22"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 21s-7-5.2-7-11a7 7 0 1 1 14 0c0 5.8-7 11-7 11Z" />
+              <circle cx="12" cy="10" r="2.6" />
+            </svg>
+          </span>
+          <div className="brand-text">
+            <h1>Культурная карта</h1>
+            <span className="muted">Центральный район Санкт-Петербурга</span>
+          </div>
         </div>
         <SearchBox
           value={searchQuery}
@@ -479,6 +519,7 @@ function MapShell() {
             className={`btn ${aiOpen ? "btn-active" : ""}`}
             onClick={() => setAiOpen((v) => !v)}
           >
+            <span className="ai-spark" aria-hidden="true">✦</span>
             AI-помощник
           </button>
           {healthChecked && health === null && (
@@ -495,6 +536,23 @@ function MapShell() {
               Без ИИ
             </span>
           )}
+          <button
+            className="theme-toggle"
+            onClick={onToggleTheme}
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label="Переключить тему"
+          >
+            {theme === "dark" ? (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="4.2" />
+                <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5 5l1.6 1.6M17.4 17.4 19 19M19 5l-1.6 1.6M6.6 17.4 5 19" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+              </svg>
+            )}
+          </button>
         </div>
       </header>
 
@@ -546,6 +604,7 @@ function MapShell() {
             radius={radiusView}
             focus={focus}
             route={route}
+            theme={theme}
             district={districtOn ? district : null}
             userLocation={userLocation}
             heatPoints={heatPoints}

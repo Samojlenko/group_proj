@@ -11,10 +11,13 @@ import {
 import { categoryColor } from "../components/CulturalMap";
 import { CATEGORY_LABELS, PLAQUE_KEYWORD } from "../constants";
 import { loadFavorites, toggleFavorite } from "../lib/favorites";
+import type { Theme } from "../lib/theme";
 import type { CulturalObject, ObjectWithDistance, RecommendResponse } from "../types";
 
 interface Props {
   objectId: number;
+  theme: Theme;
+  onToggleTheme: () => void;
   onBack: () => void;
   onOpen: (id: number) => void;
 }
@@ -40,7 +43,7 @@ function Row({ label, value }: { label: string; value?: string | null }) {
  * Страница объекта (§33): полные данные, мини-карта, ближайшие объекты
  * с расстояниями и похожие объекты. Открывается по URL /object/{id}.
  */
-export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
+export default function ObjectPage({ objectId, theme, onToggleTheme, onBack, onOpen }: Props) {
   const [object, setObject] = useState<CulturalObject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -135,10 +138,17 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
       scrollWheelZoom: false,
       attributionControl: true,
     });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap',
-    }).addTo(map);
+    L.tileLayer(
+      theme === "light"
+        ? "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+        : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      {
+        maxZoom: 19,
+        subdomains: "abcd",
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      },
+    ).addTo(map);
     L.circleMarker([object.latitude, object.longitude], {
       radius: 10,
       color: "#ffffff",
@@ -152,7 +162,7 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
     return () => {
       map.remove();
     };
-  }, [object]);
+  }, [object, theme]);
 
   const openNearby = useCallback((id: number) => onOpen(id), [onOpen]);
 
@@ -189,7 +199,7 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
     <div className="object-page">
       <div className="object-page-inner">
         <header className="object-page-header">
-          <button className="btn" onClick={onBack}>← Назад к карте</button>
+          <button className="btn btn-ghost" onClick={onBack}>← Назад к карте</button>
           <span className="category-chip" style={{ background: categoryColor(object.category) }}>
             {label}
           </span>
@@ -200,6 +210,23 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
             onClick={() => setFavIds((prev) => toggleFavorite(prev, object.id))}
           >
             {favIds.has(object.id) ? "★ В избранном" : "☆ В избранное"}
+          </button>
+          <button
+            className="theme-toggle"
+            onClick={onToggleTheme}
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label="Переключить тему"
+          >
+            {theme === "dark" ? (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="4.2" />
+                <path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5 5l1.6 1.6M17.4 17.4 19 19M19 5l-1.6 1.6M6.6 17.4 5 19" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+              </svg>
+            )}
           </button>
         </header>
 

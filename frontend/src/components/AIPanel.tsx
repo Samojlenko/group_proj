@@ -141,6 +141,8 @@ export default function AIPanel({
   const [recs, setRecs] = useState<RecommendResponse | null>(null);
   const [showStructured, setShowStructured] = useState(false);
   const [history, setHistory] = useState<string[]>(() => loadHistory());
+  /** последний заданный вопрос — показываем репликой, как в чате */
+  const [asked, setAsked] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -167,6 +169,7 @@ export default function AIPanel({
     setResult(null);
     onFocus(null);
     remember(q);
+    setAsked(q);
     if (asRecommend) {
       try {
         const res = await recommend({
@@ -234,6 +237,7 @@ export default function AIPanel({
     setRecs(null);
     onFocus(null);
     if (q) remember(q);
+    setAsked(q || "Подборка поблизости");
     try {
       const res = await recommend({
         query: q || null,
@@ -268,6 +272,7 @@ export default function AIPanel({
     setRecs(null);
     setError(null);
     setShowStructured(false);
+    setAsked(null);
     onFocus(null);
     inputRef.current?.focus();
   };
@@ -277,7 +282,9 @@ export default function AIPanel({
   return (
     <aside className="ai-panel">
       <header className="card-header">
-        <h3 className="ai-title">AI-помощник</h3>
+        <h3 className="ai-title">
+          <span className="ai-spark" aria-hidden="true">✦</span> AI-помощник
+        </h3>
         <button className="btn btn-ghost" onClick={onClose} aria-label="Закрыть">×</button>
       </header>
 
@@ -295,7 +302,7 @@ export default function AIPanel({
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
-        <button className="btn" type="submit" disabled={loading}>
+        <button className="btn btn-accent" type="submit" disabled={loading}>
           {loading ? "…" : "Найти"}
         </button>
       </form>
@@ -306,13 +313,20 @@ export default function AIPanel({
 
       {mapPoint && (
         <div className="ai-map-point">
-          Точка на карте: {mapPoint[0].toFixed(5)}, {mapPoint[1].toFixed(5)} — запросы «рядом»
-          считаю от неё, а не от геолокации.
+          <b>Точка на карте:</b> {mapPoint[0].toFixed(5)}, {mapPoint[1].toFixed(5)} — запросы
+          «рядом» считаю от неё, а не от геолокации.
         </div>
       )}
 
+      {asked && <div className="ai-msg ai-msg-user">{asked}</div>}
       {error && <div className="badge error ai-error">{error}</div>}
-      {loading && <div className="muted">Ищу…</div>}
+      {loading && (
+        <div className="ai-msg ai-msg-bot ai-typing" aria-label="Ищу ответ">
+          <span />
+          <span />
+          <span />
+        </div>
+      )}
 
       {/* --- пока диалог пуст: примеры и история --- */}
       {!hasAnswer && !loading && (
@@ -364,7 +378,7 @@ export default function AIPanel({
           {/* на отказ (action=other) не показываем «ничего не найдено» —
               explanation уже объясняет, чем сервис может помочь */}
           {result.action !== "other" && result.total === 0 && (
-            <p className="muted">Ничего не найдено — уточните запрос.</p>
+            <p className="muted empty-state">Ничего не найдено — уточните запрос.</p>
           )}
 
           {/* статистика (§36): цифры, а не только объяснение */}
@@ -416,7 +430,7 @@ export default function AIPanel({
           <p className="ai-explanation">{recs.explanation}</p>
 
           {recs.total === 0 && (
-            <p className="muted">Ничего не найдено — попробуйте изменить запрос или радиус.</p>
+            <p className="muted empty-state">Ничего не найдено — попробуйте изменить запрос или радиус.</p>
           )}
           {recs.total > 0 && (
             <ul className="ai-items">

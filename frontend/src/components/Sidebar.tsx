@@ -240,7 +240,7 @@ export default function Sidebar(props: Props) {
                 </div>
               </div>
               <button
-                className="btn wide"
+                className="btn btn-accent wide"
                 disabled={routeLoading || !hasCenter}
                 onClick={() => onBuildRoute(walkCount)}
                 title={
@@ -535,7 +535,7 @@ export default function Sidebar(props: Props) {
           </div>
         )}
         {!loading && onlyFavorites && features.length === 0 && (
-          <p className="muted">
+          <p className="muted empty-state">
             В избранном пока пусто. Нажмите ☆ рядом с объектом.
           </p>
         )}

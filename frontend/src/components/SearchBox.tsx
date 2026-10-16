@@ -245,7 +245,7 @@ export default function SearchBox({
       </div>
 
       <button
-        className="btn"
+        className="btn btn-accent"
         onClick={() => {
           setOpen(false);
           onSubmit(value);

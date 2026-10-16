@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { CATEGORY_LABELS } from "../constants";
 import type { GeoJsonFeature, WalkRouteResponse } from "../types";
+import type { Theme } from "../lib/theme";
 import type { Focus } from "../App";
 
 /** Цвета маркеров по категориям (§6, §19). */
@@ -34,6 +35,8 @@ interface Props {
   focus: Focus | null;
   /** «Прогулка»: пеший маршрут от точки — линия и нумерованные остановки */
   route: WalkRouteResponse | null;
+  /** тёмная/светлая подложка карты — в тон интерфейсу */
+  theme: Theme;
   /** GeoJSON-граница Центрального района (§10, §38) */
   district: unknown;
   userLocation: [number, number] | null;
@@ -70,6 +73,7 @@ export default function CulturalMap({
   radius,
   focus,
   route,
+  theme,
   district,
   userLocation,
   heatPoints,
@@ -116,10 +120,6 @@ export default function CulturalMap({
       zoomControl: true,
       attributionControl: true,
     });
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
     L.control.scale({ imperial: false }).addTo(map);
 
     markersRef.current = L.layerGroup().addTo(map);
@@ -144,6 +144,25 @@ export default function CulturalMap({
       mapRef.current = null;
     };
   }, []);
+
+  // подложка карты: CARTO в тон теме — тёмная и светлая
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const url =
+      theme === "light"
+        ? "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+        : "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+    const layer = L.tileLayer(url, {
+      maxZoom: 19,
+      subdomains: "abcd",
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    }).addTo(map);
+    return () => {
+      layer.remove();
+    };
+  }, [theme]);
 
   // плагин тепловой карты ожидает глобальный L — загружаем динамически (§37)
   useEffect(() => {
@@ -243,6 +262,9 @@ export default function CulturalMap({
         fillColor: color,
         fillOpacity: inFocus || isSel ? 1 : 0.75,
       });
+      // выбранный объект мягко пульсирует (CSS-анимация по классу)
+      const el = marker.getElement();
+      if (el) el.classList.toggle("marker-selected", isSel);
       // расстояние в popup обновляем только когда оно реально изменилось
       const dist = fc?.distances?.[id];
       if (popupDistRef.current.get(id) !== dist) {
