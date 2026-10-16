@@ -1344,6 +1344,13 @@ path.leaflet-interactive {
   margin-top: 0;
 }
 
+/* уточнения к ответу (§40): продолжение диалога в один клик */
+.ai-refinements {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+}
+
 .ai-hint {
   font-size: 12px;
   line-height: 1.45;

@@ -9,17 +9,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.ai import sessions
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
 from app.ai.parser import AIQueryError, parse_with_fallback
 from app.ai.recommend import recommend as run_recommend
 from app.ai.resolver import PlaceNotFound, resolve_place
-from app.ai.rules import is_deictic, parse_rules
+from app.ai.rules import detect_refinement, is_deictic, merge_refinement, parse_rules
 from app.ai.schemas_ai import StructuredQuery
 from app.config import Settings, get_settings
 from app.constants import CATEGORY_LABELS
@@ -188,61 +191,36 @@ def _resolve_target(
     return req_lat, req_lon, None
 
 
-@router.post(
-    "/query",
-    response_model=AIQueryResponse,
-    summary="Запрос на естественном языке (§22–§25, §31)",
-)
-def ai_query(
+def _continuation_note(offset: int, got: int, total: int, cap: int) -> str:
+    """Пометка к объяснению при «покажи ещё»: продолжение, лимит или конец."""
+    if offset <= 0:
+        return ""
+    if got:
+        return f" (продолжение, показаны с №{offset + 1})"
+    if total > offset:
+        return (f" — показать разом можно не больше {cap} объектов: "
+                "уточните запрос")
+    return " — больше объектов нет"
+
+
+def _execute(
+    db: Session,
+    settings: Settings,
     payload: AIQueryRequest,
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
+    sq: StructuredQuery,
+    *,
+    offset: int = 0,
+    source_query: str | None = None,
+    fallback_note: str = "",
 ) -> dict:
-    _ensure_ai(settings)
+    """Исполняет валидированный разбор: SQL-запросы и человеческое объяснение.
 
-    fallback_used = False
-    if not available(settings):
-        # сервер недоступен или модель не загружена — не тратим таймаут LLM
-        logger.warning("LLM недоступен, пробуем rule-based разбор (§53)")
-        sq = _parse_rules(payload)
-        if sq is None:
-            raise HTTPException(
-                503,
-                "AI inference server недоступен, а запрос не распознан шаблонами. "
-                "Попробуйте переформулировать или повторите позже",
-            )
-        fallback_used = True
-    else:
-        # координаты точки на карте («что рядом с этой точкой») — дополнительный
-        # контекст для модели; в запрос они попадают только при наличии (§22)
-        map_ctx: dict = {}
-        if payload.map_latitude is not None and payload.map_longitude is not None:
-            map_ctx = {"map_lat": payload.map_latitude, "map_lon": payload.map_longitude}
-        try:
-            sq = parse_with_fallback(
-                settings, payload.query, payload.latitude, payload.longitude, **map_ctx
-            )
-        except LLMError as exc:
-            # сервер отвалился во время запроса — пробуем шаблоны (§31, §53)
-            logger.warning("LLM недоступен во время запроса, пробуем rule-based: %s", exc)
-            sq = _parse_rules(payload)
-            if sq is None:
-                raise HTTPException(
-                    503,
-                    "AI inference server недоступен, а запрос не распознан шаблонами: "
-                    "попробуйте переформулировать или повторите позже",
-                ) from exc
-            fallback_used = True
-        except AIQueryError as exc:
-            # детали (какая именно модель ошиблась) — в лог, пользователю — подсказка
-            logger.warning("Разбор запроса не удался: %s", exc)
-            raise HTTPException(422, PARSE_FAILED_HINT) from exc
-
+    ``offset`` — «покажи ещё»: сколько объектов этой ветки уже показано;
+    ``source_query`` — исходный текст запроса: уточнение меняет разбор, но
+    семантику рекомендаций логичнее считать от исходной формулировки.
+    """
     limit = min(sq.limit, settings.max_limit)
     categories = sq.categories or None
-
-    # помечаем, что запрос разобран шаблонами, а не моделью (§53)
-    fallback_note = " (запрос разобран шаблонами: AI-модель недоступна, §53)" if fallback_used else ""
 
     # скрытые подтипы (мемориальные доски) отсекаются так же, как на карте (§8)
     not_kw = _not_keyword(payload.query, payload.not_keyword)
@@ -281,23 +259,31 @@ def ai_query(
         lat, lon, place = _resolve_target(db, settings, sq, user_lat, user_lon)
         result = run_recommend(
             db, settings,
-            query_text=sq.text or payload.query,
+            query_text=sq.text or source_query or payload.query,
             categories=categories,
             latitude=lat, longitude=lon,
             radius_meters=sq.radius_meters,
-            limit=limit,
+            limit=min(offset + limit, settings.max_limit),
             not_keyword=not_kw,
         )
+        items = result["items"][offset:]
         target = f" около «{place['label']}»" if place else ""
+        explanation = (
+            "Подобрано по гибридному скорингу (семантика + пространство + "
+            f"категория){target}"
+        )
+        explanation += _continuation_note(
+            offset, len(items), len(items), settings.max_limit
+        ) + fallback_note
         return {
             "action": "recommend",
-            "explanation": f"Подобрано по гибридному скорингу (семантика + пространство + "
-                           f"категория){target}" + fallback_note,
+            "explanation": explanation,
             "structured": sq.model_dump(),
             "resolved_place": place,
-            "total": len(result["items"]),
-            "items": result["items"],
+            "total": len(items),
+            "items": items,
             "statistics": None,
+            "offset": offset,
         }
 
     # --- прочие действия: нужны координаты для пространственных -------------
@@ -310,8 +296,8 @@ def ai_query(
         items, total = q.list_objects(
             db, categories=categories, theme=sq.theme, keyword=sq.keyword,
             has_website=sq.has_website, has_description=sq.has_description,
-            within_district=sq.within_district, limit=limit, lat=lat, lon=lon,
-            not_keyword=not_kw,
+            within_district=sq.within_district, limit=limit, offset=offset,
+            lat=lat, lon=lon, not_keyword=not_kw,
         )
         explanation = f"Список объектов: {_labels(sq.categories)}"
         if sq.within_district:
@@ -323,10 +309,13 @@ def ai_query(
             # доходим только в бесперспективном случае
             logger.warning("action=search без text: %s", sq.model_dump())
             raise HTTPException(422, PARSE_FAILED_HINT)
+        # у text_search пока нет параметра offset — добираем и срезаем сами
+        fetch_limit = min(offset + limit, settings.max_limit)
         items, total = q.text_search(
             db, sq.text, categories=categories, not_keyword=not_kw,
-            limit=limit, lat=lat, lon=lon,
+            limit=fetch_limit, lat=lat, lon=lon,
         )
+        items = items[offset:]
         explanation = f"Полнотекстовый поиск по запросу «{sq.text}»"
 
     elif sq.action in ("nearby", "radius_search"):
@@ -339,7 +328,7 @@ def ai_query(
             raise HTTPException(400, f"Радиус больше допустимого ({settings.max_radius_meters:.0f} м)")
         items, total, _in_radius = q.radius_objects(
             db, lat, lon, radius, categories=categories, limit=limit,
-            not_keyword=not_kw,
+            offset=offset, not_keyword=not_kw,
         )
         # человек должен видеть, откуда посчитано: «точки на карте» — это
         # та точка, которую он поставил, а не его геолокация
@@ -351,6 +340,7 @@ def ai_query(
     else:  # pragma: no cover - Literal защищает от неизвестных действий
         raise HTTPException(422, f"Неизвестное действие: {sq.action}")
 
+    explanation += _continuation_note(offset, len(items), total, settings.max_limit)
     explanation += fallback_note
     return {
         "action": sq.action,
@@ -360,7 +350,171 @@ def ai_query(
         "total": total,
         "items": items,
         "statistics": None,
+        "offset": offset,
     }
+
+
+def _run_refinement(
+    db: Session,
+    settings: Settings,
+    payload: AIQueryRequest,
+    session: sessions.Session,
+    last: sessions.Turn,
+    refinement: dict,
+) -> dict:
+    """Быстрый путь уточнения: патч на прошлый разбор, без обращения к LLM."""
+    kind = refinement["kind"]
+
+    if kind == "nth":
+        # «покажи 2-й» — адресуемся к списку прошлой выдачи
+        idx = refinement["n"] - 1
+        if idx >= len(last.item_ids):
+            raise HTTPException(
+                422,
+                f"В прошлом ответе было {len(last.item_ids)} объектов — "
+                f"№{refinement['n']} не существует. Спросите заново",
+            )
+        obj = q.get_object(db, last.item_ids[idx])
+        if obj is None:
+            raise HTTPException(404, "Объект из прошлого ответа больше не доступен")
+        return {
+            "action": last.action,
+            "explanation": (
+                f"Объект №{refinement['n']} из прошлого ответа: «{obj['name']}»"
+            ),
+            "structured": last.structured,
+            "resolved_place": None,
+            "total": 1,
+            "items": [obj],
+            "statistics": None,
+        }
+
+    merged = merge_refinement(last.structured, refinement)
+    try:
+        sq = StructuredQuery.model_validate(merged)
+    except ValidationError as exc:
+        logger.warning("Уточнение не прошло валидацию: %s (%s)", merged, exc)
+        raise HTTPException(422, PARSE_FAILED_HINT) from exc
+
+    offset = 0
+    if kind == "more":
+        offset = last.shown
+        if refinement.get("count"):
+            sq = sq.model_copy(update={"limit": refinement["count"]})
+
+    result = _execute(db, settings, payload, sq, offset=offset,
+                      source_query=last.query)
+
+    if result["action"] != "other":
+        if kind == "more":
+            # продолжаем ту же ветку: список объектов растёт, смещение — тоже
+            sessions.store.remember(session, sessions.Turn(
+                query=last.query,
+                structured=last.structured,
+                action=result["action"],
+                item_ids=last.item_ids + [i["id"] for i in result["items"]],
+                total=result["total"],
+                shown=offset + len(result["items"]),
+            ))
+        else:
+            sessions.store.remember(session, sessions.Turn(
+                query=last.query,
+                structured=sq.model_dump(),
+                action=result["action"],
+                item_ids=[i["id"] for i in result["items"]],
+                total=result["total"],
+                shown=len(result["items"]),
+            ))
+    return result
+
+
+@router.post(
+    "/query",
+    response_model=AIQueryResponse,
+    summary="Запрос на естественном языке (§22–§25, §31)",
+)
+def ai_query(
+    payload: AIQueryRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    _ensure_ai(settings)
+
+    session = sessions.store.get_or_create(payload.session_id)
+    last = session.last
+
+    # Уточнение к прошлому ответу («а теперь только музеи», «покажи ещё»):
+    # разбирается правилами мгновенно и не зависит от доступности модели (§40).
+    refinement = detect_refinement(payload.query) if last is not None else None
+    if refinement is not None:
+        result = _run_refinement(db, settings, payload, session, last, refinement)
+        result["session_id"] = session.id
+        return result
+
+    fallback_used = False
+    if not available(settings):
+        # сервер недоступен или модель не загружена — не тратим таймаут LLM
+        logger.warning("LLM недоступен, пробуем rule-based разбор (§53)")
+        sq = _parse_rules(payload)
+        if sq is None:
+            raise HTTPException(
+                503,
+                "AI inference server недоступен, а запрос не распознан шаблонами. "
+                "Попробуйте переформулировать или повторите позже",
+            )
+        fallback_used = True
+    else:
+        # координаты точки на карте («что рядом с этой точкой») — дополнительный
+        # контекст для модели; в запрос они попадают только при наличии (§22)
+        map_ctx: dict = {}
+        if payload.map_latitude is not None and payload.map_longitude is not None:
+            map_ctx = {"map_lat": payload.map_latitude, "map_lon": payload.map_longitude}
+        # Контекст диалога (§40): только когда это уже не первый обмен — модель
+        # использует его для уточняющих фраз, самостоятельные разбирает как есть.
+        if last is not None:
+            map_ctx["context"] = json.dumps(
+                {"query": last.query, "parsed": last.structured}, ensure_ascii=False
+            )
+        try:
+            sq = parse_with_fallback(
+                settings, payload.query, payload.latitude, payload.longitude, **map_ctx
+            )
+        except LLMError as exc:
+            # сервер отвалился во время запроса — пробуем шаблоны (§31, §53)
+            logger.warning("LLM недоступен во время запроса, пробуем rule-based: %s", exc)
+            sq = _parse_rules(payload)
+            if sq is None:
+                raise HTTPException(
+                    503,
+                    "AI inference server недоступен, а запрос не распознан шаблонами: "
+                    "попробуйте переформулировать или повторите позже",
+                ) from exc
+            fallback_used = True
+        except AIQueryError as exc:
+            # детали (какая именно модель ошиблась) — в лог, пользователю — подсказка
+            logger.warning("Разбор запроса не удался: %s", exc)
+            raise HTTPException(422, PARSE_FAILED_HINT) from exc
+
+    # помечаем, что запрос разобран шаблонами, а не моделью (§53)
+    fallback_note = " (запрос разобран шаблонами: AI-модель недоступна, §53)" if fallback_used else ""
+
+    result = _execute(db, settings, payload, sq,
+                      source_query=payload.query, fallback_note=fallback_note)
+
+    # Помним состоявшийся обмен: без этого «а теперь только музеи» и «покажи
+    # ещё» не к чему прицепить (§40).
+    if result["action"] != "other":
+        sessions.store.remember(session, sessions.Turn(
+            query=payload.query,
+            structured=sq.model_dump(),
+            action=result["action"],
+            item_ids=[i["id"] for i in result["items"]],
+            total=result["total"],
+            shown=len(result["items"]),
+        ))
+
+    result["session_id"] = session.id
+    return result
 
 
 @router.post(

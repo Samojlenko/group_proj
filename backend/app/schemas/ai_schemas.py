@@ -39,6 +39,15 @@ class AIQueryResponse(BaseModel):
     total: int
     items: list[ObjectWithDistance]
     statistics: dict | None = None
+    offset: int = Field(
+        default=0,
+        description="Сколько объектов было пропущено до этой страницы («покажи ещё», §40)",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Идентификатор диалога (§40): отправьте его со следующим запросом, "
+        "чтобы работали уточнения («а теперь только музеи», «покажи ещё»)",
+    )
 
 
 class RecommendRequest(BaseModel):

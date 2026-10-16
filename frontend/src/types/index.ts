@@ -142,6 +142,10 @@ export interface AIQueryResponse {
   items: ObjectWithDistance[];
   /** статистика по базе (заполняется для action="statistics", §36) */
   statistics?: Statistics | null;
+  /** сколько объектов пропущено до этой страницы («показать ещё», §40) */
+  offset?: number;
+  /** диалог (§40): передайте со следующим запросом — заработают уточнения */
+  session_id?: string | null;
 }
 
 /** Ответ POST /api/recommend (§30) */

@@ -111,6 +111,36 @@ function toFocus(
   };
 }
 
+/** Уточнения к последнему ответу (§40): «только музеи», радиус, «показать ещё». */
+function refinementChips(result: AIQueryResponse): { label: string; query: string }[] {
+  if (result.action === "other" || result.action === "statistics") return [];
+  const cats = (result.structured as { categories?: string[] | null }).categories ?? [];
+  const chips: { label: string; query: string }[] = [];
+  // смена категории: показываем все, кроме уже выбранной — в один клик
+  if (cats.length <= 1) {
+    for (const code of ["museum", "monument", "memorial", "gallery"]) {
+      if (cats.includes(code)) continue;
+      const label = (CATEGORY_LABELS[code] ?? code).toLowerCase();
+      chips.push({ label: `Только ${label}`, query: `только ${label}` });
+    }
+  }
+  // радиус — только для пространственных ответов
+  if (result.action === "nearby" || result.action === "radius_search") {
+    for (const m of [500, 1000, 2000]) {
+      chips.push({
+        label: m >= 1000 ? `Радиус ${m / 1000} км` : `Радиус ${m} м`,
+        query: `в радиусе ${m} метров`,
+      });
+    }
+  }
+  // продолжение списка, если показано меньше, чем найдено (offset — сколько
+  // объектов уже пропущено в текущей ветке диалога)
+  if (result.items.length > 0 && (result.offset ?? 0) + result.items.length < result.total) {
+    chips.push({ label: "Показать ещё", query: "ещё" });
+  }
+  return chips;
+}
+
 /**
  * AI-помощник (§31): диалог на естественном языке -> структурированный запрос (§25)
  * и гибридные рекомендации (§30). Показывает, как сервис понял запрос,
@@ -143,6 +173,8 @@ export default function AIPanel({
   const [history, setHistory] = useState<string[]>(() => loadHistory());
   /** последний заданный вопрос — показываем репликой, как в чате */
   const [asked, setAsked] = useState<string | null>(null);
+  /** диалог (§40): по нему сервер понимает уточнения («а теперь только музеи») */
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -162,13 +194,13 @@ export default function AIPanel({
     saveHistory(next);
   };
 
-  const askQuery = async (q: string, asRecommend?: boolean) => {
+  const askQuery = async (q: string, asRecommend?: boolean, keepHistory = true) => {
     setLoading(true);
     setError(null);
     setRecs(null);
     setResult(null);
     onFocus(null);
-    remember(q);
+    if (keepHistory) remember(q);
     setAsked(q);
     if (asRecommend) {
       try {
@@ -201,8 +233,11 @@ export default function AIPanel({
         map_latitude: mapLatitude,
         map_longitude: mapLongitude,
         not_keyword: notKeyword,
+        session_id: sessionId,
       });
       setResult(res);
+      // диалог продолжается: сервер запомнил контекст, уточнения идут по session_id (§40)
+      setSessionId(res.session_id ?? null);
       // подсвечиваем карту, только если есть что подсвечивать: у статистики
       // и отказа items пустые, и старая подсветка не должна гаснуть зря
       if (res.items.length > 0) {
@@ -273,11 +308,13 @@ export default function AIPanel({
     setError(null);
     setShowStructured(false);
     setAsked(null);
+    setSessionId(null);
     onFocus(null);
     inputRef.current?.focus();
   };
 
   const hasAnswer = result !== null || recs !== null;
+  const refinements = result ? refinementChips(result) : [];
 
   return (
     <aside className="ai-panel">
@@ -408,6 +445,23 @@ export default function AIPanel({
                 <ItemRow key={it.id} item={it} onSelect={onSelect} />
               ))}
             </ul>
+          )}
+
+          {/* один клик — и диалог продолжается: сервер поймёт уточнение (§40) */}
+          {refinements.length > 0 && (
+            <div className="chips ai-refinements">
+              {refinements.map((c) => (
+                <button
+                  key={c.label}
+                  className="chip chip-button"
+                  title={c.query}
+                  disabled={loading}
+                  onClick={() => void askQuery(c.query, false, false)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
           )}
 
           <div className="ai-footer muted">

@@ -23,7 +23,7 @@ _CATEGORY_WORDS: dict[str, tuple[str, ...]] = {
 }
 
 _RADIUS_RE = re.compile(
-    r"(?:в\s+радиусе|в\s+пределах|не\s+дальше\s+чем\s+на|до)\s+"
+    r"(?:в\s+радиусе|в\s+пределах|радиус\w*|не\s+дальше\s+чем\s+на|до)\s+"
     r"(\d+(?:[.,]\d+)?)\s*(км|километр\w*|м|метр\w*|метра\w*)",
     re.IGNORECASE,
 )
@@ -267,6 +267,141 @@ def _strip_boilerplate(text: str) -> str:
     words = [w for w in re.split(r"\s+", text) if w.lower() not in _STOP_WORDS]
     out = " ".join(words)
     return out[:200]
+
+
+# --- уточнения к прошлому ответу (сессии диалога, §40) ------------------------
+
+# «ещё», «дальше», «продолжи», «ещё 5» — продолжить прошлую выдачу
+_MORE_RE = re.compile(
+    r"^\s*(?:а\s+|ну\s+|давай\s+|и\s+|покажи\s+|дай\s+)*"
+    r"(?:ещё|еще|дальше|продолж\w*|следующ\w+)\s*"
+    r"(\d{1,3})?\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+# порядковые: «покажи 2-й», «второй объект», «про третий», просто «3»
+_ORDINALS = {
+    "перв": 1, "втор": 2, "трет": 3, "четвёрт": 4, "четверт": 4,
+    "пят": 5, "шест": 6, "седьм": 7, "восьм": 8, "девят": 9, "десят": 10,
+}
+_NTH_RE = re.compile(
+    r"^\s*(?:а\s+)?(?:покажи\s+|открой\s+|дай\s+|выбери\s+|про\s+)?"
+    r"(?:(\d{1,2})(?:-?(?:й|ый|ой|го|му))?"
+    r"|(перв|втор|трет|четвёрт|четверт|пят|шест|седьм|восьм|девят|десят)\w*)"
+    r"\s*(?:объект\w*|мест\w*|точк\w*|его|её|ее|из\s+них)?\s*[?!.]*\s*$",
+    re.IGNORECASE,
+)
+
+# слова, которые могут сопровождать уточнение и не несут нового смысла
+_REFINE_FILLERS = frozenset(
+    """а и ну да давай только теперь ещё еще же мне пожалуйста покажи оставь
+    объект объекты объектов место места из них их все всё хочу к""".split()
+)
+
+
+def _categories_only(text: str) -> list[str] | None:
+    """«а теперь только музеи» → ["museum"]; иначе None (это не уточнение)."""
+    cats = _find_categories(text)
+    if not cats:
+        return None
+    t = text.lower()
+    for words in _CATEGORY_WORDS.values():
+        for w in sorted(words, key=len, reverse=True):
+            t = re.sub(rf"{re.escape(w)}\w*", " ", t)
+    # «доски» — уточнение к мемориалам, а не новое слово запроса
+    t = re.sub(r"доск\w*", " ", t)
+    rest = [w.strip("?!.,«»\"'()") for w in t.split()]
+    rest = [w for w in rest if w]
+    if all(w in _REFINE_FILLERS for w in rest):
+        return cats
+    return None
+
+
+def _find_nth(text: str) -> int | None:
+    """«покажи 2-й», «второй», «3» → номер объекта из прошлого ответа."""
+    t = text.strip().lower()
+    if len(t.split()) > 4:
+        return None
+    m = _NTH_RE.match(t)
+    if not m:
+        return None
+    if m.group(1):
+        n = int(m.group(1))
+    else:
+        n = _ORDINALS.get(m.group(2) or "", 0)
+    return n if 1 <= n <= 50 else None
+
+
+def _radius_only(text: str) -> float | None:
+    """«в радиусе 500 метров» → 500.0; запрос с местом/категорией — не уточнение."""
+    radius = _find_radius(text)
+    if radius is None:
+        return None
+    if _NEARBY_RE.search(text) or _find_place(text) or _find_categories(text):
+        return None
+    if len(text.split()) > 6:
+        return None
+    return radius
+
+
+def detect_refinement(text: str) -> dict | None:
+    """Уточнение к прошлому ответу или None, если запрос самостоятельный.
+
+    Вызывается только при непустой сессии: без прошлого разбора «только
+    музеи» и «ещё» — обычные запросы, их разбирает общий конвейер.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    m = _MORE_RE.match(t)
+    if m:
+        count = int(m.group(1)) if m.group(1) else None
+        if count is not None and not 1 <= count <= 100:
+            count = None
+        return {"kind": "more", "count": count}
+
+    n = _find_nth(t)
+    if n:
+        return {"kind": "nth", "n": n}
+
+    cats = _categories_only(t)
+    if cats:
+        return {"kind": "categories", "categories": cats}
+
+    # «покажи доски» без слова «мемориальные» — тоже уточнение категории
+    if "доск" in t.lower():
+        return {"kind": "categories", "categories": ["memorial"]}
+
+    radius = _radius_only(t)
+    if radius:
+        return {"kind": "radius", "radius": radius}
+
+    return None
+
+
+def merge_refinement(previous: dict, refinement: dict) -> dict:
+    """Накладывает уточнение на прошлый разбор: неуказанное наследуется.
+
+    «а теперь только музеи» после «галереи рядом с Эрмитажем» даст
+    «музеи рядом с Эрмитажем» — место и радиус остаются прежними.
+    """
+    data = dict(previous)
+    kind = refinement.get("kind")
+
+    if kind == "categories":
+        data["categories"] = refinement["categories"]
+        # полнотекстовый поиск продолжает работать, но с новыми категориями
+    elif kind == "radius":
+        data["radius_meters"] = refinement["radius"]
+        # радиус осмыслен только для пространственных действий
+        if data.get("action") in ("list", "search", "recommend"):
+            has_origin = bool(data.get("place")) or data.get("latitude") is not None
+            data["action"] = "radius_search" if has_origin else "nearby"
+    # «more» и «nth» структуру не меняют: ими управляет API-слой
+
+    return data
+
 
 
 def _validate(data: dict) -> StructuredQuery | None:

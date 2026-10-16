@@ -112,8 +112,17 @@ class AIQueryError(RuntimeError):
 
 
 def build_user_message(query: str, user_lat: float | None, user_lon: float | None,
-                       map_lat: float | None = None, map_lon: float | None = None) -> str:
+                       map_lat: float | None = None, map_lon: float | None = None,
+                       context: str | None = None) -> str:
     parts = [f"Запрос пользователя: {query}"]
+    if context:
+        parts.append(f"Предыдущий запрос и его разбор (контекст диалога):\n{context}")
+        parts.append(
+            "Если текущая фраза — уточнение к предыдущему («а теперь только музеи», "
+            "«в радиусе 500 метров», «покажи ещё»), сохрани в разборе все поля, "
+            "которые пользователь не назвал заново. Если это новый самостоятельный "
+            "запрос — контекст игнорируй."
+        )
     if user_lat is not None and user_lon is not None:
         parts.append(f"Координаты пользователя: {user_lat}, {user_lon}")
     if map_lat is not None and map_lon is not None:
@@ -127,12 +136,17 @@ def parse_query(settings: Settings, query: str,
                 user_lon: float | None = None,
                 *,
                 map_lat: float | None = None,
-                map_lon: float | None = None) -> StructuredQuery:
-    """Текст -> валидный StructuredQuery. Ошибки -> AIQueryError (422)."""
+                map_lon: float | None = None,
+                context: str | None = None) -> StructuredQuery:
+    """Текст -> валидный StructuredQuery. Ошибки -> AIQueryError (422).
+
+    ``context`` — предыдущий разбор диалога (§40): модель использует его
+    только для уточняющих фраз, самостоятельные запросы разбирает как есть.
+    """
     raw = chat(
         settings,
         SYSTEM_PROMPT,
-        build_user_message(query, user_lat, user_lon, map_lat, map_lon),
+        build_user_message(query, user_lat, user_lon, map_lat, map_lon, context),
     )
     try:
         data = json.loads(raw)
@@ -157,7 +171,8 @@ def parse_with_fallback(settings: Settings, query: str,
                         user_lon: float | None = None,
                         *,
                         map_lat: float | None = None,
-                        map_lon: float | None = None) -> StructuredQuery:
+                        map_lon: float | None = None,
+                        context: str | None = None) -> StructuredQuery:
     """Одна повторная попытка разбора с сообщением об ошибке модели (§24).
 
     Повтор делается ТОЛЬКО когда модель ответила, но неверно (AIQueryError).
@@ -168,7 +183,7 @@ def parse_with_fallback(settings: Settings, query: str,
     детали (что именно не так со схемой) остаются в логе.
     """
     common = {"user_lat": user_lat, "user_lon": user_lon,
-              "map_lat": map_lat, "map_lon": map_lon}
+              "map_lat": map_lat, "map_lon": map_lon, "context": context}
     try:
         return parse_query(settings, query, **common)
     except LLMError:
