@@ -23,8 +23,10 @@ from app.ai import unrecognized
 from app.ai.agent import AgentError, run_agent
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
+from app.ai.fun import build_collection, collection_name, surprise_pick, taste_recommend
 from app.ai.hours import is_open_now
 from app.ai.parser import AIQueryError, parse_with_fallback
+from app.ai.quest import QUEST_RADIUS_M, build_quest
 from app.ai.recommend import recommend as run_recommend
 from app.ai.resolver import PlaceNotFound, resolve_place
 from app.ai.rules import detect_refinement, is_deictic, merge_refinement, parse_rules
@@ -63,6 +65,9 @@ NO_ORIGIN_HINT = (
     "Не понятно, от какой точки считать. Укажите место («рядом с Эрмитажем») "
     "или кликните по карте — тогда появится центр поиска"
 )
+# действия фан-режима этапа G (идеи 24–27): «удиви меня», вкус, подборки,
+# квесты — правила надёжнее модели, разбираем их до агента
+_FUN_ACTIONS = ("surprise", "taste", "collection", "quest")
 
 
 def _pick_coords(
@@ -312,12 +317,14 @@ def _execute(
     offset: int = 0,
     source_query: str | None = None,
     fallback_note: str = "",
+    exclude_ids: list[int] | None = None,
 ) -> dict:
     """Исполняет валидированный разбор: SQL-запросы и человеческое объяснение.
 
     ``offset`` — «покажи ещё»: сколько объектов этой ветки уже показано;
     ``source_query`` — исходный текст запроса: уточнение меняет разбор, но
-    семантику рекомендаций логичнее считать от исходной формулировки.
+    семантику рекомендаций логичнее считать от исходной формулировки;
+    ``exclude_ids`` — что показано в прошлом ходу («удиви меня» не повторяется).
     """
     limit = min(sq.limit, settings.max_limit)
     categories = sq.categories or None
@@ -491,6 +498,176 @@ def _execute(
             "offset": 0,
             # маршрут целиком: остановки, полилиния и метры — рисуется на карте
             "route": route,
+        }
+
+    # --- идеи этапа G: «удиви меня», профиль вкуса, подборки, квесты ---------
+
+    if sq.action == "surprise":
+        # случайный «эффектный» объект; не повторяем то, что уже показали
+        # в прошлом ходу диалога (§40)
+        obj = surprise_pick(
+            db, categories=categories, not_keyword=not_kw, exclude=exclude_ids
+        )
+        if obj is None:
+            raise HTTPException(
+                404, "В базе не нашлось объекта для «Удиви меня» — попробуйте ещё раз"
+            )
+        description = (obj.get("short_description") or obj.get("description") or "").strip()
+        explanation = (
+            f"Случайное открытие: «{obj['name']}» — "
+            f"{_labels([obj['category']]).lower()}"
+        )
+        if obj.get("address"):
+            explanation += f", {obj['address']}"
+        if description:
+            explanation += f". {description[:200]}"
+        explanation += fallback_note
+        return {
+            "action": "surprise",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": None,
+            "total": 1,
+            "items": [obj],
+            "statistics": None,
+            "offset": 0,
+        }
+
+    if sq.action == "taste":
+        # профиль вкуса (идея 25): избранное приходит с клиента, сервер только
+        # усредняет эмбеддинги и ищет ближайшие — объекты из избранного исключены
+        favorite_ids = payload.favorite_ids or []
+        if not favorite_ids:
+            raise HTTPException(
+                422,
+                "Сначала отметьте объекты звёздочкой (☆) в избранном — тогда подберу "
+                "похожее на то, что вам нравится",
+            )
+        taste = taste_recommend(
+            db, favorite_ids=favorite_ids, limit=limit, not_keyword=not_kw
+        )
+        if taste["used"] == 0:
+            raise HTTPException(
+                422,
+                "У избранных объектов нет описаний — сравнивать не с чем: добавьте "
+                "в избранное музеи, памятники, галереи или мемориалы",
+            )
+        items = taste["items"]
+        explanation = (
+            f"Похожее на ваши избранные объекты ({taste['used']} "
+            f"{_plural(taste['used'], 'объект', 'объекта', 'объектов')} с описанием): "
+            "семантическая близость описаний — чем выше процент, тем ближе к вашему вкусу"
+        ) + fallback_note
+        return {
+            "action": "taste",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": None,
+            "total": len(items),
+            "items": items,
+            "statistics": None,
+            "offset": 0,
+        }
+
+    if sq.action == "collection":
+        # подборка (идея 26): «топ» — объекты с фото и содержательными
+        # описаниями; имя и состав уходят клиенту, он сохраняет её у себя
+        size = min(sq.count or 5, 12)
+        items = build_collection(db, categories=categories, count=size, not_keyword=not_kw)
+        if items:
+            name = collection_name(categories, len(items))
+            explanation = (
+                f"Подборка «{name}»: {len(items)} "
+                f"{_plural(len(items), 'объект', 'объекта', 'объектов')} с фотографиями "
+                "и самыми содержательными описаниями — сохраните её, и она появится "
+                "на карте и в избранном"
+            ) + fallback_note
+            collection = {"name": name, "count": len(items)}
+        else:
+            explanation = (
+                "Для подборки нужны объекты с описаниями — по этому запросу таких "
+                "не нашлось: попробуйте другую категорию"
+            ) + fallback_note
+            collection = None
+        return {
+            "action": "collection",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": None,
+            "total": len(items),
+            "items": items,
+            "statistics": None,
+            "offset": 0,
+            "collection": collection,
+        }
+
+    if sq.action == "quest":
+        # квест (идея 27): маршрут как у прогулки, но вопросы генерируются
+        # из описаний — модель не видит ответов, они остаются на сервере
+        lat, lon = _origin(payload, sq)
+        place_info = None
+        if sq.place:
+            lat, lon, place_info = _resolve_target(db, settings, sq, lat, lon)
+        if lat is None or lon is None:
+            raise HTTPException(422, NO_ORIGIN_HINT)
+        quest = build_quest(
+            db, settings, lat, lon,
+            count=sq.count or 5,
+            radius_m=sq.radius_meters or QUEST_RADIUS_M,
+            categories=categories,
+            not_keyword=not_kw,
+            theme=sq.theme,
+        )
+        points = quest["points"]
+        by_id = q.objects_by_ids(db, [p["id"] for p in points])
+        items = []
+        for stop in points:
+            obj = by_id.get(stop["id"])
+            if obj:
+                # рядом с названием — сколько уже пройдено от старта
+                items.append({**obj, "distance_meters": stop["cumulative_meters"]})
+        theme_label = f" «{quest['theme']}»" if quest["theme"] else ""
+        if points:
+            explanation = (
+                f"Квест{theme_label}: {len(points)} "
+                f"{_plural(len(points), 'точка', 'точки', 'точек')}, "
+                f"{_fmt_distance(quest['total_meters'])}, "
+                f"примерно {quest['walk_minutes']} мин пешком. Читайте вопрос, "
+                "отвечайте и открывайте объект — ответ откроется по кнопке"
+            )
+        else:
+            explanation = (
+                f"Для квеста нужны объекты с описаниями в радиусе "
+                f"{quest['radius_meters']:.0f} м — здесь их не нашлось: попробуйте "
+                "другую точку или больший радиус"
+            )
+        explanation += fallback_note
+        return {
+            "action": "quest",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": place_info,
+            "total": len(points),
+            "items": items,
+            "statistics": None,
+            "offset": 0,
+            # маршрут квеста рисуется тем же слоем, что прогулка (§14)
+            "route": {
+                "start": quest["start"],
+                "radius_meters": quest["radius_meters"],
+                "count": quest["count"],
+                "total_meters": quest["total_meters"],
+                "walk_minutes": quest["walk_minutes"],
+                "items": points,
+                "polyline": quest["polyline"],
+            },
+            "quest": {
+                "theme": quest["theme"],
+                "count": len(points),
+                "total_meters": quest["total_meters"],
+                "walk_minutes": quest["walk_minutes"],
+                "points": points,
+            },
         }
 
     if sq.action == "analytics":
@@ -754,6 +931,21 @@ def _run_query(
         result["session_id"] = session.id
         return result, True
 
+    # Фан-интенты этапа G («удиви меня», вкус, подборки, квесты): правила
+    # разбирают их надёжнее модели — агент так и норовит свести «квест» к
+    # прогулке, а «подборку» к списку, — поэтому проверяем до агента (§53).
+    # Это не fallback: фраза распознана, просто детерминированно.
+    quick = _parse_rules(payload)
+    if quick is not None and quick.action in _FUN_ACTIONS:
+        result = _execute(
+            db, settings, payload, quick,
+            source_query=payload.query,
+            exclude_ids=last.item_ids if last else None,
+        )
+        _remember(session, payload.query, result)
+        result["session_id"] = session.id
+        return result, False
+
     # Многошаговый агент (идея 10): включается только когда модель доступна;
     # самостоятельный маршрут для одиночных вопросов не отличается от обычного.
     if settings.ai_agent_enabled and available(settings):
@@ -813,7 +1005,8 @@ def _run_query(
     fallback_note = " (запрос разобран шаблонами: AI-модель недоступна, §53)" if fallback_used else ""
 
     result = _execute(db, settings, payload, sq,
-                      source_query=payload.query, fallback_note=fallback_note)
+                      source_query=payload.query, fallback_note=fallback_note,
+                      exclude_ids=last.item_ids if last else None)
 
     if fallback_used:
         # журнал «не понял» (идея 23): модель недоступна, спасли шаблоны (§53)
@@ -831,8 +1024,9 @@ def _apply_summary(settings: Settings, result: dict) -> None:
     Резюме строится строго по фактам результата и проверяется на числа;
     любой сбой или недоступность модели — тихо остаётся прежний шаблон (§53).
     """
-    if not settings.ai_summary_enabled or result["action"] == "other":
+    if not settings.ai_summary_enabled or result["action"] in ("other", "quest"):
         return
+    # у квеста резюме не бывает: любое упоминание названий раскрыло бы ответы
     if not available(settings):
         return
     text = ai_summary.summarize(settings, result)
@@ -885,7 +1079,7 @@ def ai_query_stream(
         yield _sse("result", result)
         streamable = (
             not fast_path
-            and result["action"] != "other"
+            and result["action"] not in ("other", "quest")
             and settings.ai_summary_enabled
             and available(settings)
         )

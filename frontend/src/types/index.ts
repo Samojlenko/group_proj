@@ -158,6 +158,39 @@ export interface AIQueryResponse {
   session_id?: string | null;
   /** пеший маршрут (заполняется для action="walk"): рисуется на карте */
   route?: WalkRouteResponse | null;
+  /** подборка (action="collection", идея 26): имя и размер — фронт сохраняет её */
+  collection?: CollectionInfo | null;
+  /** квест (action="quest", идея 27): точки с вопросами из описаний */
+  quest?: QuestResponse | null;
+}
+
+/** Подборка (идея 26): «Топ-7 музеев» — имя и размер */
+export interface CollectionInfo {
+  name: string;
+  count: number;
+}
+
+/** Точка квеста (идея 27): вопрос, ответ и подсказка */
+export interface QuestPoint {
+  id: number;
+  name: string;
+  category: string;
+  question: string;
+  hint?: string;
+  latitude: number;
+  longitude: number;
+  /** перегон от предыдущей точки */
+  leg_meters: number;
+  /** накопленные метры от старта */
+  cumulative_meters: number;
+}
+
+export interface QuestResponse {
+  theme?: string | null;
+  count: number;
+  total_meters: number;
+  walk_minutes: number;
+  points: QuestPoint[];
 }
 
 /** Ответ POST /api/recommend (§30) */

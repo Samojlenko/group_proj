@@ -34,7 +34,7 @@ import type {
   Statistics,
   WalkRouteResponse,
 } from "./types";
-import { loadFavorites, toggleFavorite, type Favorites } from "./lib/favorites";
+import { loadFavorites, saveFavorites, toggleFavorite, type Favorites } from "./lib/favorites";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
 
 /** Что выделить на карте: результаты AI/поиска/радиуса (§38, §39). */
@@ -45,6 +45,11 @@ export interface Focus {
   distances: Record<number, number>;
   bestId: number | null;
   label: string;
+  /**
+   * id → номер точки (квест, идея 27): такие объекты рисуются нумерованными
+   * метками, чтобы порядок обхода читался на карте.
+   */
+  numbers?: Record<number, number>;
   /**
    * Ключ, по которому карта центрируется (`fitBounds`).
    * Меняется только при новом «намерении» (другой центр/запрос), а не при
@@ -164,6 +169,15 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
     (id: number) => setFavorites((prev) => toggleFavorite(prev, id)),
     [],
   );
+  /** «все объекты подборки — в избранное» (идея 26): добавляем пачкой */
+  const addFavorites = useCallback((ids: number[]) => {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      saveFavorites(next);
+      return next;
+    });
+  }, []);
 
   // --- справочники, здоровье (периодическое обновление) и граница района ------
   useEffect(() => {
@@ -684,6 +698,9 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
           mapLongitude={radiusCenter?.[1] ?? null}
           categories={filters.category}
           notKeyword={filters.not_keyword}
+          // избранное: профиль вкуса (идея 25) и «добавить подборку в избранное»
+          favoriteIds={[...favorites]}
+          onFavoriteAll={addFavorites}
         />
 
         <ObjectCard

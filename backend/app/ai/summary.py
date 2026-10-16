@@ -54,6 +54,11 @@ def _item_fact(item: dict) -> dict:
         out["билет"] = item["ticket_price"]
     if item.get("address"):
         out["адрес"] = item["address"]
+    # описание — часть карточки: даёт «эффектную подачу» (идея 24) и контекст
+    # для подсказок; числа из него становятся фактами, а не выдумкой
+    text = (item.get("short_description") or item.get("description") or "").strip()
+    if text:
+        out["описание"] = text[:240]
     return out
 
 
@@ -82,6 +87,12 @@ def build_facts(result: dict) -> dict:
             facts["объектов_показано"] = FACTS_ITEM_LIMIT
     if result.get("statistics"):
         facts["статистика"] = result["statistics"]
+    collection = result.get("collection") or {}
+    if collection:
+        facts["подборка"] = {
+            "название": collection.get("name"),
+            "объектов": collection.get("count"),
+        }
     route = result.get("route") or {}
     if route:
         facts["маршрут"] = {

@@ -83,6 +83,58 @@ _OPEN_RE = re.compile(
     r"открыт\w*|работающ\w*|работает\s+сейчас|работают\s+сейчас", re.IGNORECASE
 )
 
+# --- идеи этапа G: «удиви меня», вкус, подборки, квесты ----------------------
+
+# «удиви меня», «что-нибудь необычное», «случайное место»
+_SURPRISE_RE = re.compile(
+    r"удиви|порази|что-нибудь\s+(?:необычн|интересн|эффектн)|"
+    r"случайн\w*\s+(?:объект|место)",
+    re.IGNORECASE,
+)
+# «похожее на моё избранное», «в моём вкусе», «как то, что мне нравится»
+# (просто «покажи избранные музеи» — не вкус: избранное фильтруется на клиенте)
+_TASTE_RE = re.compile(
+    r"(?:похож|подбер|подскаж|что-то|что-нибудь)[^.!?]{0,40}избранн|"
+    r"мо[её]\w*\s+избранн|в\s+мо[её]м\s+вкусе|мо[её]м\s+вкус|"
+    r"как\s+то,?\s*что\s+мне\s+нравится",
+    re.IGNORECASE,
+)
+# «собери подборку», «топ-7 ... и сохрани», «сохрани коллекцию»
+_COLLECTION_RE = re.compile(r"подборк|собери|сохрани|коллекци", re.IGNORECASE)
+_TOP_RE = re.compile(r"топ[-\s]?(\d{1,2})", re.IGNORECASE)
+# «сделай квест по истории на 5 точек», «квест»
+_QUEST_RE = re.compile(r"квест", re.IGNORECASE)
+_QUEST_POINTS_RE = re.compile(r"на\s+(\d{1,2})\s+точек", re.IGNORECASE)
+# тема квеста: «по истории», «про архитектуру» — из неё строится название
+_THEME_WORDS: tuple[tuple[str, str], ...] = (
+    ("истори", "история"),
+    ("архитектур", "архитектура"),
+    ("литератур", "литература"),
+    ("искусств", "искусство"),
+)
+
+
+def _find_theme(text: str) -> str | None:
+    low = text.lower()
+    for stem, label in _THEME_WORDS:
+        if stem in low:
+            return label
+    return None
+
+
+def _quest_place(text: str) -> str | None:
+    """Место старта квеста: тема и число точек в название не попадают.
+
+    «Сделай квест по истории на 5 точек» — это не место «истории на 5 точек»:
+    убираем тему и счёт, затем ищем название как обычно.
+    """
+    cleaned = _QUEST_POINTS_RE.sub(" ", text)
+    stems = "|".join(stem for stem, _ in _THEME_WORDS)
+    cleaned = re.sub(
+        rf"(?:по|про|о)\s+\S*(?:{stems})\S*", " ", cleaned, flags=re.IGNORECASE
+    )
+    return _find_place(cleaned)
+
 # «от A до B», «между A и B» — пара мест для расстояния
 _PAIR_UNTIL_RE = re.compile(r"\b(?:от|между)\s+(.+?)\s+(?:до|и)\s+(.+)", re.IGNORECASE)
 # «сравни A и B», «чем отличается A от B»
@@ -325,6 +377,44 @@ def parse_rules(query: str, user_lat: float | None = None,
         metric = "newest" if _NEWEST_RE.search(text) and not _OLDEST_RE.search(text) else "oldest"
         base.update({"action": "analytics", "metric": metric,
                      "categories": categories or [], "limit": min(limit, 10)})
+        return _validate(base)
+
+    # --- идеи этапа G: «удиви меня», вкус, подборки, квесты ---------------
+    # (проверяются до recommend: «собери подборку» важнее общего «подбери»)
+
+    # «удиви меня» — случайный объект с эффектной подачей
+    if _SURPRISE_RE.search(text):
+        base.update({"action": "surprise", "categories": categories or []})
+        return _validate(base)
+
+    # «похожее на избранное» — профиль вкуса по эмбеддингам избранного
+    if _TASTE_RE.search(text):
+        base.update({"action": "taste", "categories": categories or []})
+        return _validate(base)
+
+    # «сделай квест по истории на 5 точек»
+    if _QUEST_RE.search(text):
+        points = _QUEST_POINTS_RE.search(text)
+        base.update({
+            "action": "quest",
+            "categories": categories or [],
+            "count": int(points.group(1)) if points else None,
+            "radius_meters": radius,
+            "place": _quest_place(text),
+            "theme": _find_theme(text),
+        })
+        if coords:
+            base.update({"latitude": coords[0], "longitude": coords[1], "place": None})
+        return _validate(base)
+
+    # «собери топ-7 музеев и сохрани»
+    if _COLLECTION_RE.search(text):
+        top = _TOP_RE.search(text)
+        base.update({
+            "action": "collection",
+            "categories": categories or [],
+            "count": int(top.group(1)) if top else None,
+        })
         return _validate(base)
 
     # рекомендации

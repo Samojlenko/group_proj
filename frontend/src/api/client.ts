@@ -218,6 +218,8 @@ export interface AIQueryPayload {
   map_latitude?: number | null;
   map_longitude?: number | null;
   session_id?: string | null;
+  /** избранное пользователя: по нему строится профиль вкуса (идея 25) */
+  favorite_ids?: number[] | null;
   /** ключевое слово-исключение (мемориальные доски скрыты в UI по умолчанию) */
   not_keyword?: string | null;
 }

@@ -1544,6 +1544,203 @@ path.leaflet-interactive {
   margin-top: auto;
 }
 
+/* --- фан-режим этапа G: «Удиви меня», подборки, квесты ----------------------- */
+
+.chip-accent {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* «Удиви меня» (идея 24): случайный объект с фотографией и описанием */
+.ai-surprise {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: msg-in 0.2s ease-out;
+}
+
+.ai-surprise-img {
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  display: block;
+}
+
+.ai-surprise-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.ai-surprise-name {
+  margin: 0;
+  font-size: 15px;
+}
+
+.ai-surprise-meta,
+.ai-surprise-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* подборка (идея 26): имя + кнопка «сохранить» */
+.ai-collection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.ai-collection-text b {
+  font-size: 13px;
+}
+
+.ai-collection-text p {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+}
+
+.ai-collection-saved {
+  white-space: nowrap;
+}
+
+/* сохранённые подборки в пустом состоянии */
+.ai-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-saved-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+
+.ai-saved-item .chips {
+  gap: 4px;
+}
+
+.ai-saved-item .chip {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* квест (идея 27): вопросы, ответы по кнопке, нумерация точек */
+.ai-quest {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.ai-quest-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-quest-head b {
+  font-size: 13.5px;
+}
+
+.ai-quest-meta {
+  font-size: 11.5px;
+}
+
+.ai-quest-points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-quest-point {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed var(--border-soft);
+  padding-top: 10px;
+}
+
+.ai-quest-point:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.ai-quest-q {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ai-quest-num {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.ai-quest-actions {
+  gap: 6px;
+}
+
+.ai-quest-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.ai-quest-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* нумерованная метка квеста на карте */
+.map-quest-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border: 2px solid #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
 .score-bar {
   height: 4px;
   background: var(--panel-3);

@@ -71,7 +71,8 @@ SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Ку�
 {
   "action": "list" | "search" | "nearby" | "radius_search" |
             "statistics" | "recommend" | "distance" | "compare" |
-            "walk" | "analytics" | "other",
+            "walk" | "analytics" | "surprise" | "taste" |
+            "collection" | "quest" | "other",
   "categories": ["museum" | "monument" | "memorial" | "gallery"],
   "text": строка для полнотекстового поиска или null,
   "theme": строка (тематика) или null,
@@ -143,6 +144,15 @@ SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Ку�
 19. «в N минутах ходьбы/пешком от X» — это радиус: radius_meters = N × 80
     (5 минут ≈ 400 м, 10 минут ≈ 800 м), place="X". Без «ходьбы/пешком»
     («прогулка на 30 минут») это время прогулки, а не радиус.
+20. «удиви меня», «что-нибудь необычное», «случайное место» ->
+    action="surprise".
+21. «похожее на моё избранное», «в моём вкусе», «как то, что мне нравится» ->
+    action="taste".
+22. «собери подборку», «собери топ-N ... и сохрани», «сохрани коллекцию» ->
+    action="collection": count = N (если «топ-N»), categories — если названы.
+23. «сделай квест по истории на N точек», «квест» -> action="quest":
+    count=N (если названо), theme — тема («история», «архитектура»...),
+    place — стартовая точка, если названа.
 
 Примеры (формат ответа):
 «Какой музей ближе всего к Дворцовой площади?» ->
@@ -169,6 +179,12 @@ SYSTEM_PROMPT = """Ты — парсер запросов сервиса «Ку�
 {"action":"nearby","categories":["museum"],"place":"Дворцовая площадь","open_now":true}
 «Покажи музеи в 10 минутах ходьбы от Эрмитажа» ->
 {"action":"radius_search","categories":["museum"],"place":"Эрмитаж","radius_meters":800}
+«Удиви меня» -> {"action":"surprise"}
+«Подбери похожее на моё избранное» -> {"action":"taste"}
+«Собери топ-7 музеев и сохрани» ->
+{"action":"collection","categories":["museum"],"count":7}
+«Сделай квест по истории на 5 точек от Дворцовой площади» ->
+{"action":"quest","theme":"история","count":5,"place":"Дворцовая площадь"}
 «Какая погода завтра?» -> {"action":"other"}
 
 Ответ — только JSON без каких-либо пояснений и без markdown."""

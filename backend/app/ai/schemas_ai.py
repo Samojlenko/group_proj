@@ -31,7 +31,8 @@ class StructuredQuery(BaseModel):
     # модель признаёт, что не может ответить, вместо выдуманного результата
     action: Literal["list", "nearby", "radius_search", "search",
                     "statistics", "recommend", "other",
-                    "distance", "compare", "walk", "analytics"] = "list"
+                    "distance", "compare", "walk", "analytics",
+                    "surprise", "taste", "collection", "quest"] = "list"
     categories: list[str] = Field(default_factory=list)
     text: str | None = Field(default=None, description="Текстовый запрос для поиска")
     theme: str | None = None
@@ -137,6 +138,15 @@ class StructuredQuery(BaseModel):
                 self.count = min(max(round((self.duration_minutes or 90) / 15), 3), 12)
         if self.action == "analytics" and self.metric is None:
             self.metric = "oldest"
+        if self.action == "quest":
+            # квест — короткая прогулка с вопросами: 5 точек и радиус прогулки
+            if self.count is None:
+                self.count = 5
+            if self.radius_meters is None:
+                self.radius_meters = 1500.0
+        if self.action == "collection" and self.count is None:
+            # «собери подборку» без числа — топ-5; с «топ-N» count приходит из разбора
+            self.count = 5
         return self
 
     @field_validator("duration_minutes", mode="before")

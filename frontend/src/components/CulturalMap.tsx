@@ -382,6 +382,20 @@ export default function CulturalMap({
         fillOpacity: 0.45,
         interactive: false,
       }).addTo(group);
+      const num = focus.numbers?.[id];
+      if (num != null) {
+        // квест (идея 27): номер точки — порядок обхода читается прямо на карте
+        L.marker([lat, lon], {
+          icon: L.divIcon({
+            className: "map-quest-num",
+            html: String(num),
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+          }),
+        })
+          .bindTooltip(`${num}. ${f.properties.name}`, { direction: "top" })
+          .addTo(group);
+      }
     }
 
     // лучший результат — крупная метка с подписью

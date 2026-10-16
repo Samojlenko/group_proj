@@ -4,10 +4,18 @@ import type { Focus } from "../App";
 import { categoryColor } from "./CulturalMap";
 import FactorBar from "./FactorBar";
 import { CATEGORY_LABELS } from "../constants";
+import {
+  loadCollections,
+  newCollectionId,
+  removeCollection,
+  saveCollection,
+  type SavedCollection,
+} from "../lib/collections";
 import type {
   AIItem,
   AIQueryResponse,
   ObjectWithDistance,
+  QuestResponse,
   RecommendResponse,
   WalkRouteResponse,
 } from "../types";
@@ -34,6 +42,10 @@ interface Props {
   categories?: string[];
   /** ключевое слово-исключение: не показывать скрытые на карте объекты (доски) */
   notKeyword?: string;
+  /** избранное: по нему строится профиль вкуса (идея 25) */
+  favoriteIds?: number[];
+  /** «все объекты подборки — в избранное» (идея 26) */
+  onFavoriteAll?: (ids: number[]) => void;
 }
 
 /** Примеры запросов для первого знакомства (§40). */
@@ -49,6 +61,10 @@ const DEMO_SCENARIOS: { title: string; query: string; recommend?: boolean }[] = 
   { title: "Сколько идти от Эрмитажа до Дворцовой", query: "Сколько идти от Эрмитажа до Дворцовой площади?" },
   { title: "Самый старый памятник", query: "Самый старый памятник" },
   { title: "Интересное рядом со мной", query: "Что интересного можно посмотреть рядом с этой точкой?" },
+  // идеи этапа G: фан-режим (24), подборки (26), квесты (27)
+  { title: "🎲 Удиви меня", query: "Удиви меня" },
+  { title: "Квест по истории на 5 точек", query: "Сделай квест по истории на 5 точек от Дворцовой площади" },
+  { title: "Собери топ-7 музеев и сохрани", query: "Собери топ-7 музеев и сохрани" },
   {
     title: "Подборка про русское искусство",
     query: "Хочу посмотреть русское искусство недалеко от Невского проспекта",
@@ -102,6 +118,132 @@ function ItemRow({
   );
 }
 
+/** Русская форма числа: 2 объекта, 5 объектов (для подборок). */
+function pluralObjects(n: number): string {
+  if (n % 10 === 1 && n % 100 !== 11) return "объект";
+  if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return "объекта";
+  return "объектов";
+}
+
+/** Русская форма числа: 5 точек (для квестов). */
+function pluralPoints(n: number): string {
+  if (n % 10 === 1 && n % 100 !== 11) return "точка";
+  if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return "точки";
+  return "точек";
+}
+
+/** «Удиви меня» (идея 24): случайный объект с эффектной подачей. */
+function SurpriseCard({
+  item,
+  onSelect,
+  onAgain,
+}: {
+  item: AIItem;
+  onSelect: (id: number) => void;
+  onAgain: () => void;
+}) {
+  const [imgOk, setImgOk] = useState(true);
+  return (
+    <div className="ai-surprise">
+      {item.image_url && imgOk && (
+        <img
+          className="ai-surprise-img"
+          src={item.image_url}
+          alt=""
+          loading="lazy"
+          onError={() => setImgOk(false)}
+        />
+      )}
+      <div className="ai-surprise-body">
+        <h4 className="ai-surprise-name">{item.name}</h4>
+        <p className="muted ai-surprise-meta">
+          {CATEGORY_LABELS[item.category] ?? item.category}
+          {item.address ? ` · ${item.address}` : ""}
+        </p>
+        {item.short_description && (
+          <p className="ai-surprise-text">{item.short_description}</p>
+        )}
+        {!item.short_description && item.description && (
+          <p className="ai-surprise-text">{item.description.slice(0, 400)}</p>
+        )}
+        <div className="chips">
+          <button className="btn btn-accent" onClick={() => onSelect(item.id)}>
+            Открыть карточку
+          </button>
+          <button className="btn btn-ghost" onClick={onAgain}>
+            🎲 Ещё раз
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Квест (идея 27): вопросы собраны из описаний объектов, ответы скрыты —
+ * их открывает сам пользователь. Номера точек соответствуют меткам на карте.
+ */
+function QuestBlock({
+  quest,
+  onSelect,
+}: {
+  quest: QuestResponse;
+  onSelect: (id: number) => void;
+}) {
+  const [revealed, setRevealed] = useState<Set<number>>(new Set());
+  const [hints, setHints] = useState<Set<number>>(new Set());
+  const reveal = (id: number) => setRevealed((prev) => new Set(prev).add(id));
+  const showHint = (id: number) => setHints((prev) => new Set(prev).add(id));
+  return (
+    <div className="ai-quest">
+      <div className="ai-quest-head">
+        <b>
+          Квест{quest.theme ? ` «${quest.theme}»` : ""}: {quest.count}{" "}
+          {pluralPoints(quest.count)}
+        </b>
+        <span className="muted ai-quest-meta">
+          {fmtDist(quest.total_meters)} · ~{quest.walk_minutes} мин пешком · отвечено{" "}
+          {revealed.size} из {quest.count}
+        </span>
+      </div>
+      <ol className="ai-quest-points">
+        {quest.points.map((p, i) => (
+          <li key={p.id} className="ai-quest-point">
+            <div className="ai-quest-q">
+              <span className="ai-quest-num">{i + 1}</span>
+              <span>{p.question}</span>
+            </div>
+            {revealed.has(p.id) ? (
+              <div className="ai-quest-answer">
+                <button className="list-item" onClick={() => onSelect(p.id)}>
+                  <span className="dot" style={{ background: categoryColor(p.category) }} />
+                  <span className="list-name">{p.name}</span>
+                  <span className="muted">{fmtDist(p.leg_meters)}</span>
+                </button>
+                {p.hint && <p className="muted ai-quest-hint">{p.hint}</p>}
+              </div>
+            ) : (
+              <div className="chips ai-quest-actions">
+                <button className="chip chip-button" onClick={() => reveal(p.id)}>
+                  Показать ответ
+                </button>
+                {p.hint && !hints.has(p.id) && (
+                  <button className="chip chip-button" onClick={() => showHint(p.id)}>
+                    Подсказка
+                  </button>
+                )}
+                {p.hint && hints.has(p.id) && (
+                  <span className="muted ai-quest-hint">{p.hint}</span>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /** Собирает Focus из результатов AI-запроса для показа на карте (§39). */
 function toFocus(
   items: ObjectWithDistance[],
@@ -110,6 +252,7 @@ function toFocus(
   userLat: number | null,
   userLon: number | null,
   mapPoint: [number, number] | null = null,
+  numbers: Record<number, number> | null = null,
 ): Focus | null {
   if (!items.length) return null;
   // Приоритет центра: явное место из запроса > точка, поставленная на карте >
@@ -121,8 +264,10 @@ function toFocus(
     ids: items.map((i) => i.id),
     center,
     distances: Object.fromEntries(items.map((i) => [i.id, i.distance_meters ?? 0])),
-    bestId: items[0]?.id ?? null,
+    // у квеста «лучшего» нет: все точки равнозначны, их роль — порядок обхода
+    bestId: numbers ? null : (items[0]?.id ?? null),
     label,
+    numbers: numbers ?? undefined,
     // Ключ центрирования не зависит от радиуса: слайдер не дёргает карту (§39).
     fitKey: `${label}|${center ? `${center[0].toFixed(5)},${center[1].toFixed(5)}` : "auto"}`,
   };
@@ -204,6 +349,8 @@ export default function AIPanel({
   mapLongitude,
   categories,
   notKeyword,
+  favoriteIds,
+  onFavoriteAll,
 }: Props) {
   /** точка, поставленная на карте, — приоритетный центр для «рядом с этой точкой» */
   const mapPoint: [number, number] | null =
@@ -217,6 +364,10 @@ export default function AIPanel({
   const [live, setLive] = useState<string | null>(null);
   const [showStructured, setShowStructured] = useState(false);
   const [history, setHistory] = useState<string[]>(() => loadHistory());
+  /** сохранённые подборки (идея 26): живут на карте и в избранном */
+  const [collections, setCollections] = useState<SavedCollection[]>(() => loadCollections());
+  /** текущая подборка уже сохранена — кнопка превращается в отметку */
+  const [collectionSaved, setCollectionSaved] = useState(false);
   /** последний заданный вопрос — показываем репликой, как в чате */
   const [asked, setAsked] = useState<string | null>(null);
   /** диалог (§40): по нему сервер понимает уточнения («а теперь только музеи») */
@@ -240,12 +391,58 @@ export default function AIPanel({
     saveHistory(next);
   };
 
+  /** Сохраняет подборку из ответа (идея 26): карта, избранное — всё на клиенте. */
+  const persistCollection = (res: AIQueryResponse) => {
+    if (!res.collection || res.items.length === 0) return;
+    const next = saveCollection({
+      id: newCollectionId(),
+      name: res.collection.name,
+      created: new Date().toISOString(),
+      items: res.items.map((i) => ({
+        id: i.id,
+        name: i.name,
+        category: i.category,
+        latitude: i.latitude,
+        longitude: i.longitude,
+        address: i.address ?? null,
+        short_description: i.short_description ?? null,
+      })),
+    });
+    setCollections(next);
+    setCollectionSaved(true);
+  };
+
+  /** Сохранённая подборка — как результат: список + подсветка всех точек. */
+  const showCollection = (c: SavedCollection) => {
+    const items = c.items.map((i) => ({ ...i, distance_meters: null })) as AIItem[];
+    setResult({
+      action: "collection",
+      explanation:
+        `Сохранённая подборка «${c.name}»: ${c.items.length} ` +
+        `${pluralObjects(c.items.length)} — точки подсвечены на карте`,
+      structured: { action: "collection", saved: true },
+      resolved_place: null,
+      total: c.items.length,
+      items,
+      session_id: null,
+      collection: { name: c.name, count: c.items.length },
+    });
+    setRecs(null);
+    setLive(null);
+    setAsked(`Подборка «${c.name}»`);
+    setCollectionSaved(true);
+    onFocus(
+      toFocus(items, `Подборка «${c.name}»`, null, latitude ?? null, longitude ?? null, mapPoint),
+    );
+  };
+
   const askQuery = async (q: string, asRecommend?: boolean, keepHistory = true) => {
     setLoading(true);
     setError(null);
     setRecs(null);
     setResult(null);
     setLive(null);
+    setCollectionSaved(false);
     onFocus(null);
     if (keepHistory) remember(q);
     setAsked(q);
@@ -280,6 +477,8 @@ export default function AIPanel({
       map_longitude: mapLongitude,
       not_keyword: notKeyword,
       session_id: sessionId,
+      // профиль вкуса (идея 25): сервер усреднит эмбеддинги избранного
+      favorite_ids: favoriteIds?.length ? favoriteIds : undefined,
     };
     let gotResult = false;
     const accept = (res: AIQueryResponse) => {
@@ -294,6 +493,10 @@ export default function AIPanel({
       // подсвечиваем карту, только если есть что подсвечивать: у статистики
       // и отказа items пустые, и старая подсветка не должна гаснуть зря
       if (res.items.length > 0) {
+        // квест (идея 27): точки нумеруются на карте в порядке обхода
+        const numbers = res.quest
+          ? Object.fromEntries(res.quest.points.map((p, i) => [p.id, i + 1]))
+          : null;
         onFocus(
           toFocus(
             res.items,
@@ -302,8 +505,13 @@ export default function AIPanel({
             latitude ?? null,
             longitude ?? null,
             mapPoint,
+            numbers,
           ),
         );
+      }
+      // «собери топ-7 и сохрани» — подборка сохраняется сразу (идея 26)
+      if (res.action === "collection" && res.collection && /сохран/i.test(q)) {
+        persistCollection(res);
       }
     };
     try {
@@ -444,6 +652,19 @@ export default function AIPanel({
         <>
           <div className="demo-block">
             <div className="chips ai-chips">
+              {/* профиль вкуса (идея 25): показываем, только когда есть избранное */}
+              {(favoriteIds?.length ?? 0) > 0 && (
+                <button
+                  className="chip chip-button chip-accent"
+                  title="Усредню эмбеддинги избранного и подберу похожее"
+                  onClick={() => {
+                    setText("Похожее на моё избранное");
+                    void askQuery("Подбери похожее на моё избранное", false);
+                  }}
+                >
+                  ♥ Похожее на избранное ({favoriteIds?.length})
+                </button>
+              )}
               {DEMO_SCENARIOS.map((s) => (
                 <button
                   key={s.title}
@@ -459,6 +680,45 @@ export default function AIPanel({
               ))}
             </div>
           </div>
+
+          {/* сохранённые подборки (идея 26): карта, избранное, удаление */}
+          {collections.length > 0 && (
+            <div className="demo-block">
+              <h4 className="muted">Сохранённые подборки</h4>
+              <div className="ai-saved">
+                {collections.map((c) => (
+                  <div key={c.id} className="ai-saved-item">
+                    <button className="list-item" onClick={() => showCollection(c)}>
+                      <span className="list-name">{c.name}</span>
+                      <span className="muted">
+                        {c.items.length} {pluralObjects(c.items.length)}
+                      </span>
+                    </button>
+                    <div className="chips">
+                      <button
+                        className="chip chip-button"
+                        onClick={() => showCollection(c)}
+                      >
+                        Показать
+                      </button>
+                      <button
+                        className="chip chip-button"
+                        onClick={() => onFavoriteAll?.(c.items.map((i) => i.id))}
+                      >
+                        В избранное
+                      </button>
+                      <button
+                        className="chip chip-button"
+                        onClick={() => setCollections(removeCollection(c.id))}
+                      >
+                        Удалить
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {history.length > 0 && (
             <div className="demo-block">
@@ -498,6 +758,44 @@ export default function AIPanel({
             </p>
           )}
 
+          {/* квест (идея 27): вопросы из описаний; ответы открываются по кнопке */}
+          {result.quest && result.quest.points.length > 0 && (
+            <QuestBlock
+              key={result.quest.points.map((p) => p.id).join("-")}
+              quest={result.quest}
+              onSelect={onSelect}
+            />
+          )}
+
+          {/* «Удиви меня» (идея 24): одна эффектная карточка вместо списка */}
+          {result.action === "surprise" && result.items[0] && (
+            <SurpriseCard
+              item={result.items[0]}
+              onSelect={onSelect}
+              onAgain={() => void askQuery("Удиви меня ещё раз", false, false)}
+            />
+          )}
+
+          {/* подборка (идея 26): сохраняется одним кликом — живёт на карте и в избранном */}
+          {result.collection && (
+            <div className="ai-collection">
+              <div className="ai-collection-text">
+                <b>Подборка «{result.collection.name}»</b>
+                <p className="muted">
+                  {result.collection.count} {pluralObjects(result.collection.count)} · живёт
+                  на карте и в избранном
+                </p>
+              </div>
+              {collectionSaved ? (
+                <span className="badge ok ai-collection-saved">Сохранено ✓</span>
+              ) : (
+                <button className="btn btn-accent" onClick={() => persistCollection(result)}>
+                  Сохранить подборку
+                </button>
+              )}
+            </div>
+          )}
+
           {/* на отказ (action=other) не показываем «ничего не найдено» —
               explanation уже объясняет, чем сервис может помочь; у distance
               пустые items нормальны: ответ в самом объяснении (метры и время) */}
@@ -526,13 +824,15 @@ export default function AIPanel({
             </div>
           )}
 
-          {result.items.length > 0 && (
-            <ul className="ai-items">
-              {result.items.map((it) => (
-                <ItemRow key={it.id} item={it} onSelect={onSelect} />
-              ))}
-            </ul>
-          )}
+          {result.items.length > 0 &&
+            result.action !== "surprise" &&
+            result.action !== "quest" && (
+              <ul className="ai-items">
+                {result.items.map((it) => (
+                  <ItemRow key={it.id} item={it} onSelect={onSelect} />
+                ))}
+              </ul>
+            )}
 
           {/* один клик — и диалог продолжается: сервер поймёт уточнение (§40) */}
           {refinements.length > 0 && (
