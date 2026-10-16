@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 
-from app.ai.schemas_ai import StructuredQuery
+from app.ai.schemas_ai import MAX_RADIUS_M, StructuredQuery
+from app.spatial.routes import WALK_SPEED_M_PER_MIN
 
 # коды категорий → словоформы, встречающиеся в запросах (§6)
 _CATEGORY_WORDS: dict[str, tuple[str, ...]] = {
@@ -28,6 +29,13 @@ _RADIUS_RE = re.compile(
     re.IGNORECASE,
 )
 _RADIUS_KM_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(км|километр\w*)", re.IGNORECASE)
+# «в 10 минутах ходьбы», «5 минут пешком», «10 мин шагом» — радиус через время (§14):
+# N × 80 м/мин. Без слов «ходьбы/пешком/шагом» это НЕ радиус: «погулка на 30 минут».
+_WALK_MINUTES_RE = re.compile(
+    r"(?:в\s+|за\s+)?(\d{1,3})\s*(?:минут\w*|мин\b)[\s,]+"
+    r"(?:ходьб\w+|пешком|пеш\w+|шагом|неспешн\w+\s+шагом)",
+    re.IGNORECASE,
+)
 # координаты Центрального района СПб: 59.xx, 30.xx (обе в одном запросе)
 _COORDS_RE = re.compile(r"(-?\d{1,3}[.,]\d+)\s*[,;]\s*(-?\d{1,3}[.,]\d+)")
 _LIMIT_RE = re.compile(r"(?:первые|ближайшие|топ|найди|покажи)\s+(\d{1,3})\b", re.IGNORECASE)
@@ -61,7 +69,7 @@ _DISTANCE_RE = re.compile(
 _COMPARE_RE = re.compile(r"сравни\w*|сравнени\w*|отлича\w*|разниц\w*", re.IGNORECASE)
 # «прогулка», «погулять час», «маршрут пешком», «что успеть за два часа»
 _WALK_RE = re.compile(
-    r"прогулк\w*|погуля\w*|пойти\s+пешком|пройтись|"
+    r"прогулк\w*|погулк\w*|погуля\w*|пойти\s+пешком|пройтись|"
     r"маршрут\s+(?:пешком|для\s+прогулки|прогулки)|"
     r"что\s+успеть|успею\s+за",
     re.IGNORECASE,
@@ -161,13 +169,20 @@ def _find_categories(text: str) -> list[str]:
 
 def _find_radius(text: str) -> float | None:
     m = _RADIUS_RE.search(text)
-    if not m:
-        return None
-    value = _to_number(m.group(1))
-    unit = m.group(2).lower()
-    if unit.startswith("км") or unit.startswith("километр"):
-        value *= 1000
-    return value
+    if m:
+        value = _to_number(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith("км") or unit.startswith("километр"):
+            value *= 1000
+        return value
+    # «в 10 минутах ходьбы» → 10 × 80 = 800 м (§14)
+    m = _WALK_MINUTES_RE.search(text)
+    if m:
+        minutes = int(m.group(1))
+        value = minutes * WALK_SPEED_M_PER_MIN
+        if 1 <= minutes and value <= MAX_RADIUS_M:
+            return value
+    return None
 
 
 def _find_coords(text: str) -> tuple[float, float] | None:
