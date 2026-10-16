@@ -342,7 +342,7 @@ def client(monkeypatch):
     sessions.store.clear_all()
     get_settings.cache_clear()
     app.dependency_overrides[get_settings] = lambda: Settings(
-        _env_file=None, ai_enabled=True, ai_agent_enabled=True
+        _env_file=None, ai_enabled=True, ai_agent_enabled=True, ai_summary_enabled=False
     )
     monkeypatch.setattr(ai_api, "available", lambda s: True)
     yield TestClient(app, raise_server_exceptions=False)
@@ -448,7 +448,7 @@ def test_endpoint_agent_disabled(monkeypatch):
     sessions.store.clear_all()
     get_settings.cache_clear()
     app.dependency_overrides[get_settings] = lambda: Settings(
-        _env_file=None, ai_enabled=True, ai_agent_enabled=False
+        _env_file=None, ai_enabled=True, ai_agent_enabled=False, ai_summary_enabled=False
     )
     monkeypatch.setattr(ai_api, "available", lambda s: True)
 

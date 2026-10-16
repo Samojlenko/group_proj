@@ -1845,3 +1845,62 @@ input[type="range"]::-moz-range-track {
     margin-left: 0;
   }
 }
+
+/* --- «Почему эти?» (идея 17): вклад факторов в рекомендациях --------------------- */
+
+.factor-bar {
+  display: block;
+  margin: 3px 0 4px;
+}
+
+.factor-track {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--accent-soft);
+  gap: 2px;
+}
+
+.factor-track span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  transition: width 0.25s ease-out;
+}
+
+.factor-legend {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+/* «похожие объекты» страницы объекта: строка + полоска факторов под ней */
+.nearby-list li.with-why {
+  display: block;
+}
+
+.nearby-list li.with-why .why-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* живое резюме печатается: мигающий курсор, как в чате (идея 18) */
+.ai-caret {
+  display: inline-block;
+  width: 7px;
+  height: 8px;
+  margin-left: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  vertical-align: baseline;
+  animation: ai-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes ai-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}

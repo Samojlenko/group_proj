@@ -13,10 +13,12 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.ai import sessions
+from app.ai import summary as ai_summary
 from app.ai.agent import AgentError, run_agent
 from app.ai.client import AIServiceUnavailable as LLMError
 from app.ai.client import check_available as available
@@ -727,18 +729,15 @@ def _run_refinement(
     return result
 
 
-@router.post(
-    "/query",
-    response_model=AIQueryResponse,
-    summary="Запрос на естественном языке (§22–§25, §31)",
-)
-def ai_query(
-    payload: AIQueryRequest,
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    _ensure_ai(settings)
+def _run_query(
+    db: Session, settings: Settings, payload: AIQueryRequest
+) -> tuple[dict, bool]:
+    """Общий путь /api/query и /api/query/stream.
 
+    Возвращает ``(результат, fast_path)``: ``fast_path=True`` — уточнение
+    разобралось правилами без обращения к модели (§40); таким ответам
+    LLM-резюме не нужно — быстрый путь должен оставаться мгновенным.
+    """
     session = sessions.store.get_or_create(payload.session_id)
     last = session.last
 
@@ -748,7 +747,7 @@ def ai_query(
     if refinement is not None:
         result = _run_refinement(db, settings, payload, session, last, refinement)
         result["session_id"] = session.id
-        return result
+        return result, True
 
     # Многошаговый агент (идея 10): включается только когда модель доступна;
     # самостоятельный маршрут для одиночных вопросов не отличается от обычного.
@@ -757,7 +756,7 @@ def ai_query(
         if agent_result is not None:
             _remember(session, payload.query, agent_result)
             agent_result["session_id"] = session.id
-            return agent_result
+            return agent_result, False
 
     fallback_used = False
     if not available(settings):
@@ -812,7 +811,91 @@ def ai_query(
     _remember(session, payload.query, result)
 
     result["session_id"] = session.id
+    return result, False
+
+
+def _apply_summary(settings: Settings, result: dict) -> None:
+    """LLM-резюме (идея 16): шаблонное объяснение заменяется живым текстом.
+
+    Резюме строится строго по фактам результата и проверяется на числа;
+    любой сбой или недоступность модели — тихо остаётся прежний шаблон (§53).
+    """
+    if not settings.ai_summary_enabled or result["action"] == "other":
+        return
+    if not available(settings):
+        return
+    text = ai_summary.summarize(settings, result)
+    if text:
+        result["explanation"] = text
+
+
+@router.post(
+    "/query",
+    response_model=AIQueryResponse,
+    summary="Запрос на естественном языке (§22–§25, §31)",
+)
+def ai_query(
+    payload: AIQueryRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    _ensure_ai(settings)
+    result, fast_path = _run_query(db, settings, payload)
+    if not fast_path:
+        _apply_summary(settings, result)
     return result
+
+
+def _sse(event: str, data) -> str:
+    """Кадр server-sent events: уходит и браузеру, и обычному HTTP-клиенту."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post(
+    "/query/stream",
+    summary="Запрос на естественном языке с потоковым ответом (SSE, идея 18)",
+)
+def ai_query_stream(
+    payload: AIQueryRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Стриминг ответа (идея 18): сначала готовый результат, затем — чанки
+    LLM-резюме по мере генерации, как в живом диалоге.
+
+    Порядок кадров: ``result`` (весь ответ, с шаблонным объяснением) →
+    ``token``… → ``done``. Если проверка фактов не прошла — вместо тихого
+    принятия неверного текста уходит ``reset``: клиент возвращает шаблон.
+    """
+    _ensure_ai(settings)
+    result, fast_path = _run_query(db, settings, payload)
+
+    def events():
+        yield _sse("result", result)
+        streamable = (
+            not fast_path
+            and result["action"] != "other"
+            and settings.ai_summary_enabled
+            and available(settings)
+        )
+        if streamable:
+            chunks: list[str] = []
+            for chunk in ai_summary.stream_summarize(settings, result):
+                chunks.append(chunk)
+                yield _sse("token", chunk)
+            text = ai_summary.clean_summary("".join(chunks))
+            if text:
+                bad = ai_summary.failing_numbers(text, ai_summary.facts_json(result))
+                if bad:
+                    logger.info("Стриминг-резюме отброшено (числа вне фактов: %s)", bad)
+                    yield _sse("reset", None)
+        yield _sse("done", {"session_id": result.get("session_id")})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(
@@ -880,9 +963,24 @@ def recommend(
     if result["components"]["category"]:
         parts.append("соответствие категориям")
     target = f" около «{place['label']}»" if place else ""
+    explanation = "Ранжирование по: " + (", ".join(parts) or "базовый порядок") + target
+    # подборка с текстовым запросом — тоже ответ помощника: показываем «почему»
+    # (факторы в items, идея 17) и живое резюме вместо канцелярита (идея 16)
+    summary_ctx = {
+        "action": "recommend",
+        "explanation": explanation,
+        "structured": {"categories": payload.categories,
+                       "radius_meters": payload.radius_meters},
+        "resolved_place": place,
+        "total": len(result["items"]),
+        "items": result["items"],
+        "statistics": None,
+    }
+    if payload.query:
+        _apply_summary(settings, summary_ctx)
     return {
         "items": [RecommendedItem(**i) for i in result["items"]],
         "total": len(result["items"]),
         "weights": weights,
-        "explanation": "Ранжирование по: " + (", ".join(parts) or "базовый порядок") + target,
+        "explanation": summary_ctx["explanation"],
     }

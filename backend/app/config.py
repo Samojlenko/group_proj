@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # при любом сбое — тихий откат на обычный одиночный разбор (§53)
     ai_agent_enabled: bool = True
     ai_agent_max_steps: int = 5
+    # LLM-резюме ответа (идея 16) и стриминг (идея 18): живой текст вместо
+    # шаблонного объяснения; при сбое — шаблон; у резюме свой короткий таймаут
+    ai_summary_enabled: bool = True
+    ai_summary_timeout_seconds: float = 20.0
 
     # --- Картография / геокодирование ---
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"

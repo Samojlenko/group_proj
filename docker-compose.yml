@@ -28,6 +28,7 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
       AI_ENABLED: ${AI_ENABLED:-true}
       AI_AGENT_ENABLED: ${AI_AGENT_ENABLED:-true}
+      AI_SUMMARY_ENABLED: ${AI_SUMMARY_ENABLED:-true}
       MAP_TILE_URL: ${MAP_TILE_URL:-https://tile.openstreetmap.org/{z}/{x}/{y}.png}
       GEOCODER_URL: ${GEOCODER_URL:-}
       MAX_RADIUS_METERS: ${MAX_RADIUS_METERS:-10000}

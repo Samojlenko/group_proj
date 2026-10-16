@@ -9,6 +9,7 @@ import {
   recommend,
 } from "../api/client";
 import { categoryColor } from "../components/CulturalMap";
+import FactorBar from "../components/FactorBar";
 import { CATEGORY_LABELS, PLAQUE_KEYWORD } from "../constants";
 import { loadFavorites, toggleFavorite } from "../lib/favorites";
 import type { Theme } from "../lib/theme";
@@ -324,16 +325,20 @@ export default function ObjectPage({ objectId, theme, onToggleTheme, onBack, onO
                 <p className="muted">{similar.explanation}</p>
                 <ul className="nearby-list">
                   {similar.items.slice(0, 6).map((it) => (
-                    <li key={it.id}>
-                      <button className="link-button" onClick={() => openNearby(it.id)}>
-                        {it.name}
-                      </button>
-                      <span className="muted">
-                        {typeof it.score === "number"
-                          ? `${Math.round(it.score * 100)}% · `
-                          : ""}
-                        {fmtDist(it.distance_meters)}
-                      </span>
+                    <li key={it.id} className="with-why">
+                      <div className="why-head">
+                        <button className="link-button" onClick={() => openNearby(it.id)}>
+                          {it.name}
+                        </button>
+                        <span className="muted">
+                          {typeof it.score === "number"
+                            ? `${Math.round(it.score * 100)}% · `
+                            : ""}
+                          {fmtDist(it.distance_meters)}
+                        </span>
+                      </div>
+                      {/* «почему этот» (идея 17): вклад факторов скоринга */}
+                      <FactorBar factors={it.factors} />
                     </li>
                   ))}
                 </ul>

@@ -46,6 +46,16 @@ export interface ObjectWithDistance extends CulturalObject {
   distance_km?: number | null;
 }
 
+/**
+ * Позиция выдачи AI-помощника: у рекомендаций — балл гибридного скоринга
+ * и вклад факторов («почему эти», идеи 16–17).
+ */
+export interface AIItem extends ObjectWithDistance {
+  score?: number | null;
+  /** вклад компонентов в балл: spatial / semantic / category */
+  factors?: Record<string, number> | null;
+}
+
 export interface CategoryInfo {
   code: string;
   label: string;
@@ -139,7 +149,7 @@ export interface AIQueryResponse {
     source?: string;
   } | null;
   total: number;
-  items: ObjectWithDistance[];
+  items: AIItem[];
   /** статистика по базе (заполняется для action="statistics", §36) */
   statistics?: Statistics | null;
   /** сколько объектов пропущено до этой страницы («показать ещё», §40) */
@@ -152,7 +162,7 @@ export interface AIQueryResponse {
 
 /** Ответ POST /api/recommend (§30) */
 export interface RecommendResponse {
-  items: (ObjectWithDistance & { score?: number | null })[];
+  items: AIItem[];
   total: number;
   weights: Record<string, number>;
   explanation: string;

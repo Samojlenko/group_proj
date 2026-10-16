@@ -121,12 +121,21 @@ def recommend(
     LIMIT :limit
     """
     rows = db.execute(text(sql), params).mappings().all()
-    items = [
-        {**dict(r),
-         "distance_meters": round(r["distance_m"], 1) if r["distance_m"] is not None else None,
-         "score": round(float(r["score"]), 4)}
-        for r in rows
-    ]
+    items = []
+    for r in rows:
+        # «Почему эти?» (идея 17): вклад каждого компонента в балл, чтобы
+        # интерфейс мог показать «рядом / похоже по описанию / нужная категория»
+        factors = {
+            "semantic": round(weights["sem"] * float(r["sem_score"] or 0.0), 3),
+            "spatial": round(weights["spatial"] * float(r["spatial_score"] or 0.0), 3),
+            "category": round(weights["category"] * (1.0 if categories else 0.0), 3),
+        }
+        items.append({
+            **dict(r),
+            "distance_meters": round(r["distance_m"], 1) if r["distance_m"] is not None else None,
+            "score": round(float(r["score"]), 4),
+            "factors": factors,
+        })
     return {
         "items": items,
         "weights": {k: round(v, 3) for k, v in weights.items()},

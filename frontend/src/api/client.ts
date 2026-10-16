@@ -27,23 +27,25 @@ export class ApiError extends Error {
   }
 }
 
+async function errorFrom(res: Response): Promise<ApiError> {
+  let detail = `HTTP ${res.status}`;
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") detail = body.detail;
+    else if (Array.isArray(body?.detail)) detail = body.detail.map((d: { msg?: string }) => d.msg).join("; ");
+  } catch {
+    /* тело не JSON — оставляем HTTP-статус */
+  }
+  return new ApiError(res.status, detail);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
   if (res.status === 204) return undefined as T;
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      if (typeof body?.detail === "string") detail = body.detail;
-      else if (Array.isArray(body?.detail)) detail = body.detail.map((d: { msg?: string }) => d.msg).join("; ");
-    } catch {
-      /* тело не JSON — оставляем HTTP-статус */
-    }
-    throw new ApiError(res.status, detail);
-  }
+  if (!res.ok) throw await errorFrom(res);
   return res.json() as Promise<T>;
 }
 
@@ -225,6 +227,75 @@ export function aiQuery(
   signal?: AbortSignal,
 ): Promise<import("../types").AIQueryResponse> {
   return request(`/query`, { method: "POST", body: JSON.stringify(payload), signal });
+}
+
+/** Колбэки потокового AI-ответа (SSE, идея 18). */
+export interface AIStreamHandlers {
+  /** пришёл готовый ответ: можно сразу рисовать список и подсветку на карте */
+  onResult: (res: import("../types").AIQueryResponse) => void;
+  /** очередной кусок LLM-резюме — печатаем по мере генерации */
+  onToken: (text: string) => void;
+  /** проверка фактов не прошла — вернуть шаблонное объяснение */
+  onReset: () => void;
+  onDone: () => void;
+}
+
+function dispatchSSE(block: string, handlers: AIStreamHandlers): void {
+  let event = "message";
+  let data = "";
+  for (const raw of block.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  if (event === "result") handlers.onResult(parsed as import("../types").AIQueryResponse);
+  else if (event === "token") handlers.onToken(typeof parsed === "string" ? parsed : String(parsed));
+  else if (event === "reset") handlers.onReset();
+  else if (event === "done") handlers.onDone();
+}
+
+/**
+ * Запрос к AI с потоковым ответом (SSE, идея 18): сначала кадр result —
+ * весь ответ целиком, затем кадры token — куски LLM-резюме по мере генерации.
+ */
+export async function aiQueryStream(
+  payload: AIQueryPayload,
+  handlers: AIStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${BASE}/query/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok) throw await errorFrom(res);
+  if (!res.body) throw new ApiError(0, "Сервер не вернул поток ответа");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep = buffer.indexOf("\n\n");
+      while (sep >= 0) {
+        dispatchSSE(buffer.slice(0, sep), handlers);
+        buffer = buffer.slice(sep + 2);
+        sep = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export interface RecommendPayload {

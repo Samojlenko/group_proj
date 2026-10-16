@@ -28,6 +28,20 @@ class AIQueryRequest(BaseModel):
     )
 
 
+class AIItem(ObjectWithDistance):
+    """Позиция выдачи AI-помощника.
+
+    Дополнительно к карточке объекта рекомендации несут балл гибридного
+    скоринга и вклад факторов («почему этот объект», идеи 16–17).
+    """
+
+    score: float | None = Field(default=None, description="Балл гибридного ранжирования (§28)")
+    factors: dict[str, float] | None = Field(
+        default=None,
+        description="Вклад факторов в балл: semantic / spatial / category (идея 17)",
+    )
+
+
 class AIQueryResponse(BaseModel):
     """Результат разбора и исполнения запроса (§24, §31)."""
 
@@ -38,7 +52,7 @@ class AIQueryResponse(BaseModel):
         default=None, description="Куда разрешилось имя места (§26)"
     )
     total: int
-    items: list[ObjectWithDistance]
+    items: list[AIItem]
     statistics: dict | None = None
     offset: int = Field(
         default=0,
@@ -76,6 +90,10 @@ class RecommendRequest(BaseModel):
 
 class RecommendedItem(ObjectWithDistance):
     score: float | None = Field(default=None, description="Итоговый балл гибридного ранжирования (§28)")
+    factors: dict[str, float] | None = Field(
+        default=None,
+        description="Вклад факторов в балл: semantic / spatial / category (идея 17)",
+    )
 
 
 class RecommendResponse(BaseModel):

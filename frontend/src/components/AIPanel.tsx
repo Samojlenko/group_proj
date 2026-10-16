@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, aiQuery, recommend } from "../api/client";
+import { ApiError, aiQuery, aiQueryStream, recommend } from "../api/client";
 import type { Focus } from "../App";
 import { categoryColor } from "./CulturalMap";
+import FactorBar from "./FactorBar";
 import { CATEGORY_LABELS } from "../constants";
 import type {
+  AIItem,
   AIQueryResponse,
   ObjectWithDistance,
   RecommendResponse,
@@ -84,7 +86,7 @@ function ItemRow({
   item,
   onSelect,
 }: {
-  item: ObjectWithDistance & { score?: number | null };
+  item: AIItem;
   onSelect: (id: number) => void;
 }) {
   return (
@@ -94,6 +96,8 @@ function ItemRow({
         <span className="list-name">{item.name}</span>
         <span className="muted">{fmtDist(item.distance_meters)}</span>
       </button>
+      {/* «почему эти» (идея 17): вклад факторов — только у рекомендаций */}
+      <FactorBar factors={item.factors} />
     </li>
   );
 }
@@ -209,6 +213,8 @@ export default function AIPanel({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AIQueryResponse | null>(null);
   const [recs, setRecs] = useState<RecommendResponse | null>(null);
+  /** живое LLM-резюме, печатается потоком (идеи 16, 18); null — шаблон */
+  const [live, setLive] = useState<string | null>(null);
   const [showStructured, setShowStructured] = useState(false);
   const [history, setHistory] = useState<string[]>(() => loadHistory());
   /** последний заданный вопрос — показываем репликой, как в чате */
@@ -239,6 +245,7 @@ export default function AIPanel({
     setError(null);
     setRecs(null);
     setResult(null);
+    setLive(null);
     onFocus(null);
     if (keepHistory) remember(q);
     setAsked(q);
@@ -265,16 +272,18 @@ export default function AIPanel({
       }
       return;
     }
-    try {
-      const res = await aiQuery({
-        query: q,
-        latitude,
-        longitude,
-        map_latitude: mapLatitude,
-        map_longitude: mapLongitude,
-        not_keyword: notKeyword,
-        session_id: sessionId,
-      });
+    const payload = {
+      query: q,
+      latitude,
+      longitude,
+      map_latitude: mapLatitude,
+      map_longitude: mapLongitude,
+      not_keyword: notKeyword,
+      session_id: sessionId,
+    };
+    let gotResult = false;
+    const accept = (res: AIQueryResponse) => {
+      gotResult = true;
       setResult(res);
       // диалог продолжается: сервер запомнил контекст, уточнения идут по session_id (§40)
       setSessionId(res.session_id ?? null);
@@ -296,8 +305,26 @@ export default function AIPanel({
           ),
         );
       }
+    };
+    try {
+      // потоковый путь (идея 18): список появляется сразу по кадру result,
+      // а объяснение печатается по мере генерации резюме; при сбое до первого
+      // кадра — тихий откат на обычный запрос (§53), уже показанный ответ
+      // при обрыве потока не трогаем
+      await aiQueryStream(payload, {
+        onResult: accept,
+        onToken: (t) => setLive((prev) => (prev ?? "") + t),
+        onReset: () => setLive(null),
+        onDone: () => undefined,
+      });
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+      if (!gotResult) {
+        try {
+          accept(await aiQuery(payload));
+        } catch (e2) {
+          setError(e2 instanceof ApiError ? e2.detail : (e2 as Error).message);
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -349,6 +376,7 @@ export default function AIPanel({
     setText("");
     setResult(null);
     setRecs(null);
+    setLive(null);
     setError(null);
     setShowStructured(false);
     setAsked(null);
@@ -403,7 +431,7 @@ export default function AIPanel({
 
       {asked && <div className="ai-msg ai-msg-user">{asked}</div>}
       {error && <div className="badge error ai-error">{error}</div>}
-      {loading && (
+      {loading && !hasAnswer && live === null && (
         <div className="ai-msg ai-msg-bot ai-typing" aria-label="Ищу ответ">
           <span />
           <span />
@@ -456,7 +484,10 @@ export default function AIPanel({
 
       {result && (
         <section className="ai-result">
-          <p className="ai-explanation">{result.explanation}</p>
+          <p className="ai-explanation">
+            {live ?? result.explanation}
+            {loading && live !== null && <span className="ai-caret" aria-hidden="true" />}
+          </p>
 
           {/* многошаговый агент (function calling): видно, какие инструменты
               он вызвал — «аналитика по годам → поиск объектов» */}

@@ -6,6 +6,7 @@
 продолжает работать в обычном GIS-режиме.
 """
 
+import json
 import logging
 import time
 
@@ -31,11 +32,34 @@ _CHAT_CACHE_SIZE = 256
 def _MESSAGES_KEY(messages: list[dict]) -> str:
     """Ключ кэша LLM: модель + содержимое сообщений."""
     try:
-        from json import dumps
-
-        return dumps({"m": messages}, ensure_ascii=False, sort_keys=True)
+        return json.dumps({"m": messages}, ensure_ascii=False, sort_keys=True)
     except (TypeError, ValueError):  # noqa: PERF203 - нестандартные сообщения
         return ""
+
+
+def _chat_key(settings: Settings, messages: list[dict]) -> str | None:
+    body = _MESSAGES_KEY(messages)
+    return f"{settings.ai_model}|{body}" if body else None
+
+
+def get_chat_cache(settings: Settings, messages: list[dict]) -> str | None:
+    """Ответ модели из кэша (§46) — например, для повторного стриминга."""
+    key = _chat_key(settings, messages)
+    return _chat_cache.get(key) if key else None
+
+
+def put_chat_cache(settings: Settings, messages: list[dict], content: str) -> None:
+    """Сохранить ответ модели в кэш (§46) — одинаковый запрос не платится дважды."""
+    key = _chat_key(settings, messages)
+    if not key:
+        return
+    if len(_chat_cache) >= _CHAT_CACHE_SIZE:
+        _chat_cache.pop(next(iter(_chat_cache)))
+    _chat_cache[key] = content
+
+
+def _timeout(settings: Settings, timeout: float | None) -> float:
+    return settings.ai_timeout_seconds if timeout is None else timeout
 
 
 class AIServiceUnavailable(Exception):
@@ -64,17 +88,21 @@ def invalidate_availability_cache() -> None:
     _avail_cache.clear()
 
 
-def chat_completion(settings: Settings, messages: list[dict], *, json_format: bool = True) -> str:
+def chat_completion(
+    settings: Settings,
+    messages: list[dict],
+    *,
+    json_format: bool = True,
+    timeout: float | None = None,
+) -> str:
     """Одно сообщение модели через Ollama /api/chat. Возвращает текст ответа.
 
     Идентичные запросы обслуживаются из кэша (§46) — повторный ввод того же
     текста не приводит к повторному вызову модели.
     """
-    cache_key = _MESSAGES_KEY(messages)
-    if cache_key:
-        cache_key = f"{settings.ai_model}|{cache_key}"
-        if cache_key in _chat_cache:
-            return _chat_cache[cache_key]
+    cache_key = _chat_key(settings, messages)
+    if cache_key and cache_key in _chat_cache:
+        return _chat_cache[cache_key]
     payload: dict = {
         "model": settings.ai_model,
         "messages": messages,
@@ -87,7 +115,7 @@ def chat_completion(settings: Settings, messages: list[dict], *, json_format: bo
         resp = httpx.post(
             f"{settings.ai_base_url.rstrip('/')}/api/chat",
             json=payload,
-            timeout=settings.ai_timeout_seconds,
+            timeout=_timeout(settings, timeout),
         )
     except httpx.HTTPError as exc:
         raise AIServiceUnavailable(f"AI server недоступен: {exc}") from exc
@@ -96,11 +124,51 @@ def chat_completion(settings: Settings, messages: list[dict], *, json_format: bo
     resp.raise_for_status()
     data = resp.json()
     content = data.get("message", {}).get("content", "")
-    if cache_key:
-        if len(_chat_cache) >= _CHAT_CACHE_SIZE:
-            _chat_cache.pop(next(iter(_chat_cache)))
-        _chat_cache[cache_key] = content
+    put_chat_cache(settings, messages, content)
     return content
+
+
+def chat_completion_stream(
+    settings: Settings,
+    messages: list[dict],
+    *,
+    timeout: float | None = None,
+):
+    """Стриминг ответа модели (идея 18): чанки текста по мере генерации.
+
+    Генератор выдаёт куски ``message.content`` из Ollama-потока (``stream: true``);
+    ошибки на верхнем уровне — тот же ``AIServiceUnavailable`` (§53).
+    """
+    payload: dict = {
+        "model": settings.ai_model,
+        "messages": messages,
+        "stream": True,
+        "options": {"temperature": 0.0},
+    }
+    try:
+        with httpx.stream(
+            "POST",
+            f"{settings.ai_base_url.rstrip('/')}/api/chat",
+            json=payload,
+            timeout=_timeout(settings, timeout),
+        ) as resp:
+            if resp.status_code >= 500:
+                raise AIServiceUnavailable(f"AI server вернул {resp.status_code}")
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                chunk = (data.get("message") or {}).get("content") or ""
+                if chunk:
+                    yield chunk
+                if data.get("done"):
+                    break
+    except httpx.HTTPError as exc:
+        raise AIServiceUnavailable(f"AI server недоступен: {exc}") from exc
 
 
 def chat_tools(settings: Settings, messages: list[dict], tools: list[dict]) -> dict:
