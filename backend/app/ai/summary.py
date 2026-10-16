@@ -15,7 +15,7 @@ import re
 
 from app.ai import client
 from app.config import Settings
-from app.constants import CATEGORY_LABELS
+from app.constants import AMENITY_LABELS, CATEGORY_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +28,12 @@ SYSTEM_PROMPT = (
     "готовый ответ сервиса и факты о нём в JSON. Перепиши ответ живым "
     "человеческим языком: одно-два коротких предложения, дружелюбно, без "
     "канцелярита. Строго опирайся на факты: названия, расстояния, числа, "
-    "категории — ничего не выдумывай и не меняй числа. Если объектов "
-    "несколько, подскажи, с какого начать (обычно с ближайшего) и что "
-    "логично посмотреть после него. Сохрани смысл важных оговорок из "
-    "ответа сервиса (сколько объектов открыто сейчас и т. п.). Пиши "
-    "по-русски, без маркдауна, списков и обёртывающих кавычек."
+    "категории — ничего не выдумывай и не меняй числа; не называй места, "
+    "которых нет в фактах. Если объектов несколько, подскажи, с какого "
+    "начать (обычно с ближайшего) и что логично посмотреть после него. "
+    "Сохрани смысл важных оговорок из ответа сервиса (сколько объектов "
+    "открыто сейчас и т. п.). Пиши по-русски, без маркдауна, списков и "
+    "обёртывающих кавычек."
 )
 
 
@@ -62,6 +63,38 @@ def _item_fact(item: dict) -> dict:
     return out
 
 
+def _amenity_fact(item: dict) -> dict:
+    """Факты заведения (идея 28): только поля, которые есть в ответе."""
+    out: dict = {"название": item.get("name")}
+    label = AMENITY_LABELS.get(item.get("category"), item.get("category"))
+    if label:
+        out["тип"] = label
+    distance = item.get("distance_meters")
+    if distance is not None:
+        out["расстояние_м"] = round(float(distance))
+    if item.get("address"):
+        out["адрес"] = item["address"]
+    if item.get("opening_hours"):
+        out["часы"] = item["opening_hours"]
+    return out
+
+
+def _weather_fact(weather: dict) -> dict:
+    """Факты погоды (идея 29): градусы и вероятность — числами из ответа."""
+    temp = weather.get("temperature")
+    if temp is None:
+        return {}
+    out: dict = {"сейчас": f"{temp:+.0f}°, {weather.get('description', '')}".strip()}
+    if weather.get("apparent_temperature") is not None:
+        out["ощущается_как"] = f"{weather['apparent_temperature']:+.0f}°"
+    if weather.get("temp_min") is not None and weather.get("temp_max") is not None:
+        out["днём"] = f"{weather['temp_min']:+.0f}…{weather['temp_max']:+.0f}°"
+    if weather.get("precipitation_probability") is not None:
+        out["вероятность_осадков"] = f"{weather['precipitation_probability']}%"
+    out["дождь"] = bool(weather.get("is_rainy"))
+    return out
+
+
 def build_facts(result: dict) -> dict:
     """Факты строго из полей результата: модель не видит ничего сверх ответа."""
     structured = result.get("structured") or {}
@@ -87,6 +120,16 @@ def build_facts(result: dict) -> dict:
             facts["объектов_показано"] = FACTS_ITEM_LIMIT
     if result.get("statistics"):
         facts["статистика"] = result["statistics"]
+    amenities = result.get("amenities") or []
+    if amenities:
+        facts["заведения"] = [_amenity_fact(a) for a in amenities[:FACTS_ITEM_LIMIT]]
+        if len(amenities) > FACTS_ITEM_LIMIT:
+            facts["заведений_показано"] = FACTS_ITEM_LIMIT
+    weather = result.get("weather") or {}
+    if weather:
+        fact = _weather_fact(weather)
+        if fact:
+            facts["погода"] = fact
     collection = result.get("collection") or {}
     if collection:
         facts["подборка"] = {
@@ -160,11 +203,22 @@ def failing_numbers(text: str, facts: str) -> list[str]:
     return bad
 
 
+# служебный мусор модели: не-русские иероглифы и рассказ про формат данных —
+# такое резюме не показываем, лучше шаблон (проверено вживую: qwen выдал
+# китайскую вставку «預期的 JSON 格式…», числа при этом сходились)
+_BAD_SUMMARY_RE = re.compile(
+    r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|"
+    r"\bjson\b|\bJSON\b|формат\w*\s+данн",
+)
+
+
 def validate_summary(text: str, facts: str) -> bool:
     """Резюме честное, если все его числа есть в фактах (антигаллюцинация)."""
     if not 12 <= len(text) <= 400:
         return False
     if "{" in text or "}" in text:
+        return False
+    if _BAD_SUMMARY_RE.search(text):
         return False
     return not failing_numbers(text, facts)
 

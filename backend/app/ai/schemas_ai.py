@@ -23,6 +23,13 @@ CATEGORY_SYNONYMS: dict[str, str] = {
 MAX_RADIUS_M = 10000.0
 MAX_LIMIT = 100
 
+# синонимы категорий заведений (идея 28): LLM может ответить по-русски
+AMENITY_SYNONYMS: dict[str, str] = {
+    "cafe": "cafe", "кафе": "cafe", "кофе": "cafe", "кофейня": "cafe", "coffee": "cafe",
+    "toilet": "toilet", "туалет": "toilet", "уборная": "toilet", "wc": "toilet",
+    "parking": "parking", "парковка": "parking", "стоянка": "parking",
+}
+
 
 class StructuredQuery(BaseModel):
     """Описание того, что хочет пользователь — в терминах API (§22–§24)."""
@@ -32,7 +39,8 @@ class StructuredQuery(BaseModel):
     action: Literal["list", "nearby", "radius_search", "search",
                     "statistics", "recommend", "other",
                     "distance", "compare", "walk", "analytics",
-                    "surprise", "taste", "collection", "quest"] = "list"
+                    "surprise", "taste", "collection", "quest",
+                    "amenities", "weather"] = "list"
     categories: list[str] = Field(default_factory=list)
     text: str | None = Field(default=None, description="Текстовый запрос для поиска")
     theme: str | None = None
@@ -57,6 +65,14 @@ class StructuredQuery(BaseModel):
         default=None, description="Метрика аналитики: самый старый / самый новый"
     )
     count: int | None = Field(default=None, description="Остановок в прогулке (1..12)")
+    # --- идеи этапа H: заведения OSM (28) и погода (29) ---------------------
+    amenity: Literal["cafe", "toilet", "parking"] | None = Field(
+        default=None, description="Какое заведение искать: cafe/toilet/parking (action=amenities)"
+    )
+    advice: bool = Field(
+        default=False,
+        description="Погода: запрос просит совет, что посмотреть (action=weather)",
+    )
 
     @field_validator("categories", mode="before")
     @classmethod
@@ -147,6 +163,9 @@ class StructuredQuery(BaseModel):
         if self.action == "collection" and self.count is None:
             # «собери подборку» без числа — топ-5; с «топ-N» count приходит из разбора
             self.count = 5
+        if self.action == "amenities" and self.radius_meters is None:
+            # заведение нужно «здесь и сейчас»: 800 м — это ~10 минут пешком
+            self.radius_meters = 800.0
         return self
 
     @field_validator("duration_minutes", mode="before")
@@ -173,6 +192,38 @@ class StructuredQuery(BaseModel):
         except (TypeError, ValueError) as exc:
             raise ValueError(f"count должно быть числом, получено {v!r}") from exc
         return min(max(n, 1), 12)
+
+    @field_validator("amenity", mode="before")
+    @classmethod
+    def _amenity_code(cls, v):
+        """Нормализация категории заведения: «кафе»/«кофейня» -> cafe."""
+        if v is None:
+            return None
+        key = str(v).strip().lower()
+        code = AMENITY_SYNONYMS.get(key)
+        if code is None:
+            raise ValueError(
+                f"неизвестная категория заведения '{v}' (допустимы: cafe, toilet, parking)"
+            )
+        return code
+
+    @field_validator("advice", mode="before")
+    @classmethod
+    def _advice_flag(cls, v):
+        """LLM иногда шлёт null/строку — advice обязан стать bool."""
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            key = v.strip().lower()
+            if key in ("true", "да", "yes", "1"):
+                return True
+            if key in ("false", "нет", "no", "0", ""):
+                return False
+        if isinstance(v, (int, float)) and v in (0, 1):
+            return bool(v)
+        raise ValueError(f"ожидалось boolean, получено {v!r}")
 
     @field_validator("place", "place2", "theme", "keyword", mode="before")
     @classmethod

@@ -2101,3 +2101,102 @@ input[type="range"]::-moz-range-track {
     opacity: 0;
   }
 }
+
+/* --- этап H: заведения OSM (идея 28) и погода (идея 29) ---------------------- */
+
+/* эмодзи-метка заведения на карте: читается мгновенно, не спорит с кружками
+   объектов культуры */
+.amenity-marker {
+  background: none;
+  border: none;
+}
+
+.amenity-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 2px solid var(--pin, #94a3b8);
+  box-shadow: var(--shadow-1);
+  transition: transform 0.12s ease;
+}
+
+.amenity-marker:hover .amenity-pin {
+  transform: scale(1.18);
+}
+
+/* найденное помощником заведение — с ярким ореолом */
+.amenity-pin-hot {
+  border-width: 3px;
+  outline: 3px solid var(--pin, #94a3b8);
+  outline-offset: 1px;
+}
+
+/* строки списка заведений: эмодзи в цветном кружке + адрес и часы */
+.amenity-row {
+  cursor: default;
+}
+
+.amenity-emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 12px;
+  flex: none;
+}
+
+.amenity-meta {
+  font-size: 11.5px;
+  margin: 0 0 4px 30px;
+}
+
+.ai-amenity-note {
+  font-size: 11.5px;
+  margin: 0;
+}
+
+/* погода (идея 29): карточка фактов в ответе помощника */
+.ai-weather {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.ai-weather-wet {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.ai-weather-icon {
+  font-size: 26px;
+  line-height: 1;
+}
+
+.ai-weather-text {
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.ai-weather-extra {
+  font-size: 11.5px;
+}
+
+/* тумблеров стало пять (тепловая карта, граница + три слоя заведений):
+   на узком экране они переносятся, оставаясь прижатыми вправо */
+.map-toggles {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 340px;
+}

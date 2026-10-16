@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Routes, Route, useNavigate, useParams } from "react-router-dom";
 import AIPanel from "./components/AIPanel";
-import CulturalMap, { type RadiusView } from "./components/CulturalMap";
+import CulturalMap, { type AmenityFocus, type RadiusView } from "./components/CulturalMap";
 import ObjectCard from "./components/ObjectCard";
 import SearchBox from "./components/SearchBox";
 import Sidebar from "./components/Sidebar";
@@ -10,6 +10,7 @@ import { PLAQUE_KEYWORD } from "./constants";
 import {
   ApiError,
   buildRoute,
+  getAmenitiesGeoJson,
   getCategories,
   getDensity,
   getDistrict,
@@ -25,6 +26,7 @@ import {
   searchObjects,
 } from "./api/client";
 import type {
+  AmenityFeature,
   CulturalObject,
   GeoJsonFeature,
   Health,
@@ -154,6 +156,15 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
   const [heatOn, setHeatOn] = useState(false);
   const [districtOn, setDistrictOn] = useState(true);
   const [district, setDistrict] = useState<unknown>(null);
+  // слой заведений OSM (идея 28): кафе/туалеты/парковки — тумблеры над картой
+  const [amenityLayers, setAmenityLayers] = useState<Record<string, boolean>>({
+    cafe: false,
+    toilet: false,
+    parking: false,
+  });
+  const [amenities, setAmenities] = useState<AmenityFeature[] | null>(null);
+  const [amenityFocus, setAmenityFocus] = useState<AmenityFocus | null>(null);
+  const amenitiesLoadRef = useRef(false);
   const [heatPoints, setHeatPoints] = useState<
     { latitude: number; longitude: number; weight: number }[] | null
   >(null);
@@ -229,6 +240,50 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
       alive = false;
     };
   }, [heatOn]);
+
+  // --- слой заведений OSM (идея 28) --------------------------------------------
+  /** Данные слоя грузятся один раз и живут на клиенте: тумблеры мгновенны. */
+  const loadAmenities = useCallback(() => {
+    if (amenitiesLoadRef.current) return;
+    amenitiesLoadRef.current = true;
+    getAmenitiesGeoJson()
+      .then((fc) => setAmenities(fc.features ?? []))
+      .catch((e: Error) => {
+        amenitiesLoadRef.current = false;
+        setError(`Заведения: ${e.message}`);
+      });
+  }, []);
+
+  const toggleAmenityLayer = useCallback(
+    (code: string) => {
+      const turningOn = !amenityLayers[code];
+      if (turningOn) loadAmenities();
+      setAmenityLayers((prev) => ({ ...prev, [code]: !prev[code] }));
+      // выключили категорию — снимаем и подсветку ответа помощника по ней
+      if (!turningOn) {
+        setAmenityFocus((prev) =>
+          prev && prev.categories.includes(code) ? null : prev,
+        );
+      }
+    },
+    [amenityLayers, loadAmenities],
+  );
+
+  /** Ответ помощника (action=amenities): включаем слои и подсвечиваем находки. */
+  const handleAmenityFocus = useCallback(
+    (f: AmenityFocus | null) => {
+      setAmenityFocus(f);
+      if (f && f.categories.length) {
+        loadAmenities();
+        setAmenityLayers((prev) => {
+          const next = { ...prev };
+          for (const c of f.categories) next[c] = true;
+          return next;
+        });
+      }
+    },
+    [loadAmenities],
+  );
 
   // --- загрузка объектов по фильтрам (дебаунс + отмена устаревших) ------------
   useEffect(() => {
@@ -436,6 +491,7 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
     // новый центр — новое намерение: гасим подсветку и список поиска/AI,
     // иначе старое «съедает» результаты радиуса на карте и в сайдборе
     setAiFocus(null);
+    setAmenityFocus(null);
     setSearchResults(null);
     setSearchTotal(null);
   }, []);
@@ -644,6 +700,9 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
             userLocation={userLocation}
             heatPoints={heatPoints}
             clickMode={radiusMode}
+            amenityLayers={amenityLayers}
+            amenities={amenities}
+            amenityFocus={amenityFocus}
             onSelect={selectObject}
             onMapClick={handleMapClick}
           />
@@ -659,6 +718,28 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
               onClick={() => setDistrictOn((v) => !v)}
             >
               Граница района
+            </button>
+            {/* заведения OSM (идея 28): слой грузится один раз при включении */}
+            <button
+              className={`heat-toggle btn ${amenityLayers.cafe ? "btn-active" : ""}`}
+              title="Кафе и кофейни из OpenStreetMap"
+              onClick={() => toggleAmenityLayer("cafe")}
+            >
+              ☕ Кафе
+            </button>
+            <button
+              className={`heat-toggle btn ${amenityLayers.toilet ? "btn-active" : ""}`}
+              title="Общественные туалеты из OpenStreetMap"
+              onClick={() => toggleAmenityLayer("toilet")}
+            >
+              🚻 Туалеты
+            </button>
+            <button
+              className={`heat-toggle btn ${amenityLayers.parking ? "btn-active" : ""}`}
+              title="Парковки из OpenStreetMap"
+              onClick={() => toggleAmenityLayer("parking")}
+            >
+              🅿️ Парковки
             </button>
           </div>
           {radiusMode && !radiusCenter && (
@@ -691,6 +772,7 @@ function MapShell({ theme, onToggleTheme }: ShellThemeProps) {
           onSelect={selectObject}
           onFocus={setAiFocus}
           onWalkRoute={handleAiRoute}
+          onAmenityFocus={handleAmenityFocus}
           latitude={userLocation?.[0] ?? null}
           longitude={userLocation?.[1] ?? null}
           // точка, выбранная на карте: помощник должен уметь считать от неё

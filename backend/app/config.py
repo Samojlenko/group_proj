@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # повторы разбора при невалидном ответе модели (идея 21), сверх первой попытки
     ai_parse_retries: int = 1
 
+    # --- Погода (идея 29, этап H): open-meteo, ключи не нужны --------------
+    weather_enabled: bool = True
+    weather_timeout_seconds: float = 8.0
+    weather_cache_seconds: int = 600  # 10 минут: погода не меняется быстрее
+    weather_lat: float = 59.9375  # Дворцовая площадь — центр карты
+    weather_lon: float = 30.3086
+
     # --- Картография / геокодирование ---
     map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     geocoder_url: str = ""  # внешний геокодер — только fallback (§26)

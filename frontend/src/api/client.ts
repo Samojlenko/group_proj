@@ -1,4 +1,5 @@
 import type {
+  AmenityCollection,
   CategoryInfo,
   CulturalObject,
   DistanceResult,
@@ -9,6 +10,7 @@ import type {
   RadiusResponse,
   SearchResponse,
   Statistics,
+  WeatherInfo,
   WhatNearbyResponse,
 } from "../types";
 
@@ -350,6 +352,21 @@ export function getNeighbours(): Promise<{
 /** Граница Центрального района (§10, §38) — GeoJSON-полигон. */
 export function getDistrict(): Promise<GeoJsonCollection & { features: { geometry: unknown }[] }> {
   return request(`/district`);
+}
+
+// --- OSM-слой заведений и погода (идеи 28–29, этап H) -------------------------
+
+/** Слой заведений (идея 28): кафе/туалеты/парковки — FeatureCollection. */
+export function getAmenitiesGeoJson(
+  category?: string,
+  signal?: AbortSignal,
+): Promise<AmenityCollection> {
+  return request(`/amenities/geojson${toQuery({ category })}`, { signal });
+}
+
+/** Погода сейчас (идея 29): для бейджа в панели и подсказок. */
+export function getWeather(signal?: AbortSignal): Promise<WeatherInfo> {
+  return request(`/weather`, { signal });
 }
 
 // --- «Прогулка» ---------------------------------------------------------------

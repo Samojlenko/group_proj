@@ -10,8 +10,10 @@ from fastapi.responses import JSONResponse
 
 from app.api import health, objects
 from app.api import ai as ai_router
+from app.api import amenities as amenities_router
 from app.api import analytics as analytics_router
 from app.api import route as route_router
+from app.api import weather as weather_router
 from app.config import get_settings
 from app.logging_config import AccessLogMiddleware, setup_logging
 
@@ -71,8 +73,10 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(objects.router)
 app.include_router(ai_router.router)
+app.include_router(amenities_router.router)
 app.include_router(analytics_router.router)
 app.include_router(route_router.router)
+app.include_router(weather_router.router)
 
 
 @app.exception_handler(Exception)

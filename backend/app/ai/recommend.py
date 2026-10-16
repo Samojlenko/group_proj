@@ -132,7 +132,15 @@ def recommend(
         }
         items.append({
             **dict(r),
-            "distance_meters": round(r["distance_m"], 1) if r["distance_m"] is not None else None,
+            # служебные колонки SQL-ранжирования приходят как Decimal (numeric):
+            # SSE-поток сериализует ответ json.dumps мимо Pydantic — приводим
+            # к float всё, что может им оказаться (вклады, дистанцию, score)
+            "sem_score": float(r["sem_score"] or 0.0),
+            "spatial_score": float(r["spatial_score"] or 0.0),
+            "distance_m": float(r["distance_m"]) if r["distance_m"] is not None else None,
+            "distance_meters": (
+                round(float(r["distance_m"]), 1) if r["distance_m"] is not None else None
+            ),
             "score": round(float(r["score"]), 4),
             "factors": factors,
         })

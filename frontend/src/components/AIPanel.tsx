@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, aiQuery, aiQueryStream, recommend } from "../api/client";
+import { ApiError, aiQuery, aiQueryStream, getWeather, recommend } from "../api/client";
 import type { Focus } from "../App";
-import { categoryColor } from "./CulturalMap";
+import {
+  amenityColor,
+  amenityEmoji,
+  categoryColor,
+  type AmenityFocus,
+} from "./CulturalMap";
 import FactorBar from "./FactorBar";
-import { CATEGORY_LABELS } from "../constants";
+import { AMENITY_LABELS, CATEGORY_LABELS } from "../constants";
 import {
   loadCollections,
   newCollectionId,
@@ -14,10 +19,12 @@ import {
 import type {
   AIItem,
   AIQueryResponse,
+  AmenityItem,
   ObjectWithDistance,
   QuestResponse,
   RecommendResponse,
   WalkRouteResponse,
+  WeatherInfo,
 } from "../types";
 
 interface Props {
@@ -31,6 +38,8 @@ interface Props {
    * слоем, что и кнопка «Прогулка». null — снять маршрут, если он был от AI.
    */
   onWalkRoute?: (r: WalkRouteResponse | null) => void;
+  /** заведения OSM (action=amenities, идея 28): включить слой и подсветить */
+  onAmenityFocus?: (focus: AmenityFocus | null) => void;
   latitude?: number | null;
   longitude?: number | null;
   /**
@@ -70,6 +79,12 @@ const DEMO_SCENARIOS: { title: string; query: string; recommend?: boolean }[] = 
     query: "Хочу посмотреть русское искусство недалеко от Невского проспекта",
     recommend: true,
   },
+  // идеи этапа H: заведения из OSM (28) и погода (29)
+  { title: "☕ Кофе рядом с Эрмитажем", query: "Где выпить кофе рядом с Эрмитажем?" },
+  {
+    title: "☔ Что посмотреть в дождь",
+    query: "Что посмотреть сегодня, учитывая дождь?",
+  },
 ];
 
 const HISTORY_KEY = "kmap.ai.history";
@@ -96,6 +111,49 @@ function saveHistory(items: string[]) {
 function fmtDist(m?: number | null): string {
   if (m === null || m === undefined) return "";
   return m >= 1000 ? `${(m / 1000).toFixed(1)} км` : `${Math.round(m)} м`;
+}
+
+/** «+7°», «−3°» — знак всегда виден: это погода, а не список (идея 29). */
+function fmtTemp(t?: number | null): string {
+  if (t === null || t === undefined) return "";
+  return `${t > 0 ? "+" : ""}${Math.round(t)}°`;
+}
+
+/** Иконка погоды по WMO-коду (идея 29): дождь, снег, гроза, туман, солнце. */
+function weatherIcon(w: WeatherInfo): string {
+  const code = w.weather_code ?? -1;
+  if (code >= 95) return "⛈️";
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return "🌨️";
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "🌧️";
+  if (code === 45 || code === 48) return "🌫️";
+  if (code === 0) return w.is_day === false ? "🌙" : "☀️";
+  if (code === 1 || code === 2) return w.is_day === false ? "🌙" : "⛅";
+  return "☁️";
+}
+
+/** Заведение OSM (идея 28): кафе, туалет или парковка — карточки объекта нет. */
+function AmenityRow({ item }: { item: AmenityItem }) {
+  const label = AMENITY_LABELS[item.category] ?? item.category;
+  const meta = [item.address, item.opening_hours].filter(Boolean).join(" · ");
+  return (
+    <li className="ai-item">
+      <div className="list-item amenity-row">
+        <span
+          className="amenity-emoji"
+          title={label}
+          style={{
+            background: `${amenityColor(item.category)}22`,
+            color: amenityColor(item.category),
+          }}
+        >
+          {amenityEmoji(item.category)}
+        </span>
+        <span className="list-name">{item.name}</span>
+        <span className="muted">{fmtDist(item.distance_meters)}</span>
+      </div>
+      {meta && <p className="muted amenity-meta">{meta}</p>}
+    </li>
+  );
 }
 
 function ItemRow({
@@ -279,7 +337,8 @@ function refinementChips(result: AIQueryResponse): { label: string; query: strin
   const cats = (result.structured as { categories?: string[] | null }).categories ?? [];
   const chips: { label: string; query: string }[] = [];
   // смена категории: показываем все, кроме уже выбранной — в один клик
-  if (cats.length <= 1) {
+  // (у погоды и заведений категории устроены иначе — их не предлагаем)
+  if (cats.length <= 1 && result.action !== "weather" && result.action !== "amenities") {
     for (const code of ["museum", "monument", "memorial", "gallery"]) {
       if (cats.includes(code)) continue;
       const label = (CATEGORY_LABELS[code] ?? code).toLowerCase();
@@ -287,7 +346,11 @@ function refinementChips(result: AIQueryResponse): { label: string; query: strin
     }
   }
   // радиус — только для пространственных ответов
-  if (result.action === "nearby" || result.action === "radius_search") {
+  if (
+    result.action === "nearby" ||
+    result.action === "radius_search" ||
+    result.action === "amenities"
+  ) {
     for (const m of [500, 1000, 2000]) {
       chips.push({
         label: m >= 1000 ? `Радиус ${m / 1000} км` : `Радиус ${m} м`,
@@ -296,8 +359,10 @@ function refinementChips(result: AIQueryResponse): { label: string; query: strin
     }
   }
   // продолжение списка, если показано меньше, чем найдено (offset — сколько
-  // объектов уже пропущено в текущей ветке диалога)
-  if (result.items.length > 0 && (result.offset ?? 0) + result.items.length < result.total) {
+  // объектов уже пропущено в текущей ветке диалога); у заведений (идея 28)
+  // список свой — amenities, а не items
+  const shown = result.amenities?.length ? result.amenities.length : result.items.length;
+  if (shown > 0 && (result.offset ?? 0) + shown < result.total) {
     chips.push({ label: "Показать ещё", query: "ещё" });
   }
   return chips;
@@ -343,6 +408,7 @@ export default function AIPanel({
   onSelect,
   onFocus,
   onWalkRoute,
+  onAmenityFocus,
   latitude,
   longitude,
   mapLatitude,
@@ -372,16 +438,34 @@ export default function AIPanel({
   const [asked, setAsked] = useState<string | null>(null);
   /** диалог (§40): по нему сервер понимает уточнения («а теперь только музеи») */
   const [sessionId, setSessionId] = useState<string | null>(null);
+  /** погода сейчас (идея 29): бейдж в пустом диалоге — кликом спросить о ней */
+  const [weather, setWeather] = useState<WeatherInfo | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 50);
   }, [open]);
 
+  // погода грузится при открытии панели и переиспользуется: это украшение,
+  // недоступность сервиса — не ошибка и ничему не мешает (§53)
+  useEffect(() => {
+    if (!open || weather) return;
+    let alive = true;
+    getWeather()
+      .then((w) => alive && setWeather(w))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [open, weather]);
+
   // при закрытии панели снимаем выделение на карте
   useEffect(() => {
-    if (!open) onFocus(null);
-  }, [open, onFocus]);
+    if (!open) {
+      onFocus(null);
+      onAmenityFocus?.(null);
+    }
+  }, [open, onFocus, onAmenityFocus]);
 
   if (!open) return null;
 
@@ -490,6 +574,15 @@ export default function AIPanel({
       // кнопка «Прогулка»; на другие ответы просим снять только AI-маршрут
       // (пользовательский, построенный вручную, App не тронет)
       onWalkRoute?.(res.route ?? null);
+      // заведения OSM (идея 28): включаем слои на карте и подсвечиваем находки
+      if (res.amenities && res.amenities.length > 0) {
+        onAmenityFocus?.({
+          categories: [...new Set(res.amenities.map((a) => a.category))],
+          ids: res.amenities.map((a) => a.id),
+        });
+      } else {
+        onAmenityFocus?.(null);
+      }
       // подсвечиваем карту, только если есть что подсвечивать: у статистики
       // и отказа items пустые, и старая подсветка не должна гаснуть зря
       if (res.items.length > 0) {
@@ -591,6 +684,7 @@ export default function AIPanel({
     setSessionId(null);
     onFocus(null);
     onWalkRoute?.(null);
+    onAmenityFocus?.(null);
     inputRef.current?.focus();
   };
 
@@ -652,6 +746,21 @@ export default function AIPanel({
         <>
           <div className="demo-block">
             <div className="chips ai-chips">
+              {/* погода сейчас (идея 29): клик — вопрос о погоде */}
+              {weather && (
+                <button
+                  className={`chip chip-button${weather.is_rainy ? "" : " chip-accent"}`}
+                  title="Спросить про погоду"
+                  onClick={() => {
+                    const q = "Какая сегодня погода в Петербурге?";
+                    setText(q);
+                    void askQuery(q, false);
+                  }}
+                >
+                  {weatherIcon(weather)} Сейчас {fmtTemp(weather.temperature)},{" "}
+                  {weather.description}
+                </button>
+              )}
               {/* профиль вкуса (идея 25): показываем, только когда есть избранное */}
               {(favoriteIds?.length ?? 0) > 0 && (
                 <button
@@ -798,9 +907,49 @@ export default function AIPanel({
 
           {/* на отказ (action=other) не показываем «ничего не найдено» —
               explanation уже объясняет, чем сервис может помочь; у distance
-              пустые items нормальны: ответ в самом объяснении (метры и время) */}
-          {result.action !== "other" && result.action !== "distance" && result.total === 0 && (
-            <p className="muted empty-state">Ничего не найдено — уточните запрос.</p>
+              пустые items нормальны: ответ в самом объяснении (метры и время);
+              у погоды (идея 29) ответ — сам прогноз, а не список мест */}
+          {result.action !== "other" &&
+            result.action !== "distance" &&
+            result.action !== "weather" &&
+            result.total === 0 && (
+              <p className="muted empty-state">Ничего не найдено — уточните запрос.</p>
+            )}
+
+          {/* погода (идея 29): карточка с фактами; текст — в explanation выше */}
+          {result.weather && (
+            <div className={`ai-weather${result.weather.is_rainy ? " ai-weather-wet" : ""}`}>
+              <span className="ai-weather-icon" aria-hidden="true">
+                {weatherIcon(result.weather)}
+              </span>
+              <div className="ai-weather-text">
+                <b>{fmtTemp(result.weather.temperature)}</b>{" "}
+                <span>{result.weather.description}</span>
+                <div className="muted ai-weather-extra">
+                  {result.weather.temp_min != null && result.weather.temp_max != null
+                    ? `днём ${fmtTemp(result.weather.temp_min)}…${fmtTemp(result.weather.temp_max)}`
+                    : ""}
+                  {result.weather.precipitation_probability != null
+                    ? ` · осадки ${result.weather.precipitation_probability}%`
+                    : ""}
+                  {result.weather.is_rainy ? " · возьмите зонт" : ""}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* заведения OSM (идея 28): кафе/туалеты/парковки — метки уже на карте */}
+          {result.amenities && result.amenities.length > 0 && (
+            <>
+              <ul className="ai-items">
+                {result.amenities.map((a) => (
+                  <AmenityRow key={a.id} item={a} />
+                ))}
+              </ul>
+              <p className="muted ai-amenity-note">
+                Метки включены на карте — клик по метке покажет часы работы.
+              </p>
+            </>
           )}
 
           {/* статистика (§36): цифры, а не только объяснение */}

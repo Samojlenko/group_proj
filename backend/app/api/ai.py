@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -29,10 +31,18 @@ from app.ai.parser import AIQueryError, parse_with_fallback
 from app.ai.quest import QUEST_RADIUS_M, build_quest
 from app.ai.recommend import recommend as run_recommend
 from app.ai.resolver import PlaceNotFound, resolve_place
-from app.ai.rules import detect_refinement, is_deictic, merge_refinement, parse_rules
+from app.ai.rules import (
+    detect_refinement,
+    is_deictic,
+    merge_refinement,
+    parse_rules,
+    weather_advice_wanted,
+)
 from app.ai.schemas_ai import StructuredQuery
+from app.ai.weather import UNAVAILABLE_HINT as WEATHER_UNAVAILABLE_HINT
+from app.ai.weather import get_weather
 from app.config import Settings, get_settings
-from app.constants import CATEGORY_LABELS
+from app.constants import AMENITY_LABELS, CATEGORY_LABELS
 from app.database import get_db
 from app.schemas.ai_schemas import (
     AIQueryRequest,
@@ -43,6 +53,7 @@ from app.schemas.ai_schemas import (
     UnrecognizedItem,
     UnrecognizedResponse,
 )
+from app.spatial import amenities as amenity_q
 from app.spatial import queries as q
 from app.spatial.routes import WALK_SPEED_M_PER_MIN, build_walk_route
 
@@ -65,9 +76,12 @@ NO_ORIGIN_HINT = (
     "Не понятно, от какой точки считать. Укажите место («рядом с Эрмитажем») "
     "или кликните по карте — тогда появится центр поиска"
 )
-# действия фан-режима этапа G (идеи 24–27): «удиви меня», вкус, подборки,
-# квесты — правила надёжнее модели, разбираем их до агента
-_FUN_ACTIONS = ("surprise", "taste", "collection", "quest")
+# действия фан-режима этапа G (идеи 24–27) и слоёв этапа H (идеи 28–29):
+# «удиви меня», вкус, подборки, квесты, заведения OSM, погода — правила
+# разбирают их надёжнее модели, поэтому проверяем их до агента
+_QUICK_ACTIONS = ("surprise", "taste", "collection", "quest", "amenities", "weather")
+# заведение нужно «здесь и сейчас»: 800 м — примерно 10 минут пешком
+AMENITY_DEFAULT_RADIUS_M = 800.0
 
 
 def _pick_coords(
@@ -670,6 +684,75 @@ def _execute(
             },
         }
 
+    if sq.action == "weather":
+        # погода (идея 29): факты open-meteo; если просят совет — подборка
+        # под крышей (дождь/снег/гроза) либо для прогулки (сухо)
+        weather = get_weather(settings)
+        if weather is None:
+            raise HTTPException(503, WEATHER_UNAVAILABLE_HINT)
+        advice = sq.advice or weather_advice_wanted(source_query or payload.query)
+        items: list[dict] = []
+        total = 0
+        now_text = f"{weather['temperature']:+.0f}°, {weather['description']}"
+        place = None
+        if advice:
+            indoor = weather["is_rainy"]
+            user_lat, user_lon = _origin(payload, sq)
+            lat, lon, place = _resolve_target(db, settings, sq, user_lat, user_lon)
+            target = f" рядом с «{place['label']}»" if place else ""
+            if indoor:
+                query_text = "музей, выставка, экспозиция, искусство, под крышей"
+                cats = ["museum", "gallery"]
+                explanation = (
+                    f"Сейчас в Петербурге {now_text} — подобрал места под крышей{target}"
+                )
+            else:
+                query_text = "памятник, архитектура, набережная, прогулка"
+                cats = ["monument"]
+                explanation = (
+                    f"Сейчас в Петербурге {now_text} — хорошая погода для прогулки: "
+                    f"вот что посмотреть{target}"
+                )
+            rec = run_recommend(
+                db, settings,
+                query_text=query_text,
+                categories=cats,
+                latitude=lat, longitude=lon,
+                radius_meters=sq.radius_meters,
+                limit=min(offset + limit, settings.max_limit),
+                not_keyword=not_kw,
+            )
+            items = rec["items"][offset:]
+            total = len(rec["items"])
+        else:
+            parts = [f"Сейчас в Петербурге {now_text}."]
+            if weather.get("temp_min") is not None and weather.get("temp_max") is not None:
+                parts.append(
+                    f"Днём {weather['temp_min']:+.0f}…{weather['temp_max']:+.0f}°."
+                )
+            prob = weather.get("precipitation_probability")
+            if prob is not None:
+                parts.append(f"Вероятность осадков в ближайшие часы — {prob}%.")
+            parts.append(
+                "Спросите «что посмотреть в дождь» — подберу места под крышей."
+                if weather["is_rainy"]
+                else "Спросите «что посмотреть сегодня» — подберу, где погулять."
+            )
+            explanation = " ".join(parts)
+        explanation += _continuation_note(offset, len(items), total, settings.max_limit)
+        explanation += fallback_note
+        return {
+            "action": "weather",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": place,
+            "total": total,
+            "items": items,
+            "weather": weather,
+            "statistics": None,
+            "offset": offset,
+        }
+
     if sq.action == "analytics":
         metric = sq.metric or "oldest"
         objs = q.objects_by_year(
@@ -781,6 +864,39 @@ def _execute(
             items = opened[offset:offset + limit]
             total = len(opened)
             explanation += hours_note
+    elif sq.action == "amenities":
+        # заведения OSM (идея 28): кафе/туалеты/парковки вокруг точки
+        if lat is None or lon is None:
+            raise HTTPException(422, NO_ORIGIN_HINT)
+        radius = sq.radius_meters or AMENITY_DEFAULT_RADIUS_M
+        if radius > settings.max_radius_meters:
+            raise HTTPException(
+                400, f"Радиус больше допустимого ({settings.max_radius_meters:.0f} м)"
+            )
+        amenities, total = amenity_q.amenities_near(
+            db, lat, lon, radius,
+            category=sq.amenity, limit=limit, offset=offset,
+        )
+        where_label = (
+            f"«{place_info['label']}»" if place_info else _origin_label(payload, lat, lon)
+        )
+        what = AMENITY_LABELS[sq.amenity] if sq.amenity else "Заведения"
+        explanation = f"{what} в радиусе {radius:.0f} м от {where_label}"
+        if not amenities:
+            explanation += " — ничего не нашлось, попробуйте увеличить радиус"
+        explanation += _continuation_note(offset, len(amenities), total, settings.max_limit)
+        explanation += fallback_note
+        return {
+            "action": "amenities",
+            "explanation": explanation,
+            "structured": sq.model_dump(),
+            "resolved_place": place_info,
+            "total": total,
+            "items": [],
+            "amenities": amenities,
+            "statistics": None,
+            "offset": offset,
+        }
     else:  # pragma: no cover - Literal защищает от неизвестных действий
         raise HTTPException(422, f"Неизвестное действие: {sq.action}")
 
@@ -800,16 +916,21 @@ def _execute(
 
 def _remember(session: sessions.Session, query: str, result: dict) -> None:
     """Помним состоявшийся обмен (§40): без этого «а теперь только музеи» и
-    «покажи ещё» не к чему прицепить. Отказы (other) не запоминаются."""
+    «покажи ещё» не к чему прицепить. Отказы (other) не запоминаются.
+
+    Заведения OSM (идея 28) попадают в тот же список: «покажи ещё» листает
+    их страницами, как и объекты культуры.
+    """
     if result["action"] == "other":
         return
+    amenities = result.get("amenities") or []
     sessions.store.remember(session, sessions.Turn(
         query=query,
         structured=result["structured"],
         action=result["action"],
-        item_ids=[i["id"] for i in result["items"]],
+        item_ids=[i["id"] for i in result["items"]] + [a["id"] for a in amenities],
         total=result["total"],
-        shown=len(result["items"]),
+        shown=len(result["items"]) + len(amenities),
     ))
 
 
@@ -931,12 +1052,13 @@ def _run_query(
         result["session_id"] = session.id
         return result, True
 
-    # Фан-интенты этапа G («удиви меня», вкус, подборки, квесты): правила
-    # разбирают их надёжнее модели — агент так и норовит свести «квест» к
-    # прогулке, а «подборку» к списку, — поэтому проверяем до агента (§53).
-    # Это не fallback: фраза распознана, просто детерминированно.
+    # Фан-интенты этапа G и слои этапа H («удиви меня», вкус, подборки,
+    # квесты, заведения OSM, погода): правила разбирают их надёжнее модели —
+    # агент так и норовит свести «квест» к прогулке, а «подборку» к списку, —
+    # поэтому проверяем до агента (§53). Это не fallback: фраза распознана,
+    # просто детерминированно.
     quick = _parse_rules(payload)
-    if quick is not None and quick.action in _FUN_ACTIONS:
+    if quick is not None and quick.action in _QUICK_ACTIONS:
         result = _execute(
             db, settings, payload, quick,
             source_query=payload.query,
@@ -1051,9 +1173,23 @@ def ai_query(
     return result
 
 
+def _json_default(o):
+    """Decimal/даты из SQL в SSE: поток обходит Pydantic, json.dumps — нет.
+
+    Обычный `/api/query` сериализует ответ через response_model, где Decimal
+    превращается в float сам; у SSE-потока такой прослойки нет, поэтому
+    страховка нужна здесь (иначе кадр result падает и ответ не доходит).
+    """
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def _sse(event: str, data) -> str:
     """Кадр server-sent events: уходит и браузеру, и обычному HTTP-клиенту."""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=_json_default)}\n\n"
 
 
 @router.post(
@@ -1089,11 +1225,11 @@ def ai_query_stream(
                 chunks.append(chunk)
                 yield _sse("token", chunk)
             text = ai_summary.clean_summary("".join(chunks))
-            if text:
-                bad = ai_summary.failing_numbers(text, ai_summary.facts_json(result))
-                if bad:
-                    logger.info("Стриминг-резюме отброшено (числа вне фактов: %s)", bad)
-                    yield _sse("reset", None)
+            if text and not ai_summary.validate_summary(text, ai_summary.facts_json(result)):
+                # та же проверка, что и в непоточном резюме: числа в фактах,
+                # без служебного мусора модели (китайские вставки, «JSON»)
+                logger.info("Стриминг-резюме отброшено (не прошло проверку): %r", text)
+                yield _sse("reset", None)
         yield _sse("done", {"session_id": result.get("session_id")})
 
     return StreamingResponse(

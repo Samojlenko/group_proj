@@ -162,6 +162,58 @@ export interface AIQueryResponse {
   collection?: CollectionInfo | null;
   /** квест (action="quest", идея 27): точки с вопросами из описаний */
   quest?: QuestResponse | null;
+  /** заведения OSM (action="amenities", идея 28): кафе/туалеты/парковки рядом */
+  amenities?: AmenityItem[] | null;
+  /** погода (action="weather", идея 29): open-meteo — факты и совет */
+  weather?: WeatherInfo | null;
+}
+
+/** Заведение OSM (идея 28): кафе, туалет или парковка — не объект культуры */
+export interface AmenityItem {
+  id: number;
+  name: string;
+  category: "cafe" | "toilet" | "parking" | string;
+  address?: string | null;
+  opening_hours?: string | null;
+  latitude: number;
+  longitude: number;
+  /** метры от точки отсчёта (считает PostGIS) */
+  distance_meters?: number | null;
+}
+
+/** Погода сейчас (идея 29): open-meteo, без ключей */
+export interface WeatherInfo {
+  temperature: number;
+  apparent_temperature?: number | null;
+  description: string;
+  precipitation?: number;
+  precipitation_probability?: number | null;
+  weather_code?: number | null;
+  wind_speed?: number | null;
+  is_day?: boolean | null;
+  /** плохая для прогулки погода: дождь, ливень, снег или гроза */
+  is_rainy: boolean;
+  temp_min?: number | null;
+  temp_max?: number | null;
+  updated_at?: string | null;
+}
+
+/** Заведение на слое карты (GET /api/amenities/geojson, идея 28) */
+export interface AmenityFeature {
+  type: "Feature";
+  id: number;
+  geometry: { type: "Point"; coordinates: [number, number] };
+  properties: {
+    name: string;
+    category: string;
+    address?: string | null;
+    opening_hours?: string | null;
+  };
+}
+
+export interface AmenityCollection {
+  type: "FeatureCollection";
+  features: AmenityFeature[];
 }
 
 /** Подборка (идея 26): «Топ-7 музеев» — имя и размер */

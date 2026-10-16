@@ -428,6 +428,23 @@ def test_stream_resets_on_invented_numbers(monkeypatch, client):
     assert kinds[-1] == "done"
 
 
+def test_stream_resets_on_cjk_summary(monkeypatch, client):
+    """Китайская вставка модели — тоже reset: числа при этом сходятся."""
+    _patch_parse_list(monkeypatch)
+    _patch_list(monkeypatch, [_obj(1, "Музей А")])
+    monkeypatch.setattr(
+        ai_client, "chat_completion_stream",
+        lambda s, m, **k: iter(["Из 1 музея начните с «Музей А». ",
+                                "預期的 JSON 格式导致信息丢失"]),
+    )
+
+    res = client.post("/api/query/stream", json={"query": "музеи"})
+    kinds = [e for e, _ in _events(res.text)]
+    assert kinds[0] == "result"
+    assert "reset" in kinds  # служебный мусор модели: клиент вернёт шаблон
+    assert kinds[-1] == "done"
+
+
 def test_stream_fast_path_has_no_tokens(monkeypatch, client):
     _patch_parse_list(monkeypatch)
     _patch_list(monkeypatch, [_obj(1, "Музей А"), _obj(2, "Музей Б")])

@@ -134,27 +134,77 @@ def import_objects(cur) -> int:
     return count
 
 
+def import_amenities(cur) -> int:
+    """Идея 28: кафе/туалеты/парковки из data/processed/amenities.json.
+
+    Геометрия не передаётся: триггер trg_amenities_sync вычисляет её из
+    latitude/longitude (как у cultural_objects).
+    """
+    path = PROCESSED / "amenities.json"
+    if not path.exists():
+        print("Нет data/processed/amenities.json — запустите fetch_amenities.py")
+        return 0
+    amenities = json.loads(path.read_text(encoding="utf-8"))
+
+    cur.execute("TRUNCATE amenities RESTART IDENTITY")
+    for a in amenities:
+        cur.execute(
+            """
+            INSERT INTO amenities (osm_type, osm_id, category, name, address,
+                                   opening_hours, latitude, longitude, source, source_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                a["element"],
+                a["id"],
+                a["category"],
+                a["name"],
+                a.get("address"),
+                a.get("opening_hours"),
+                a["latitude"],
+                a["longitude"],
+                a.get("source", "osm"),
+                a.get("source_id"),
+            ),
+        )
+    return len(amenities)
+
+
 def main() -> None:
     try:
         import psycopg
     except ImportError:
         raise SystemExit("Нужен psycopg: pip install -r backend/requirements.txt (или запуск в контейнере)")
 
+    # «amenities» — только слои заведений: полная перезагрузка cultural_objects
+    # стирает эмбеддинги, а они считаются долго (Ollama); для добавления
+    # слоя к живой базе достаточно этого режима
+    section = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if section not in ("all", "amenities"):
+        raise SystemExit(f"Неизвестный раздел: {section} (all|amenities)")
+
     url = db_url()
-    print(f"Подключение: {url.split('@')[-1]}")
+    print(f"Подключение: {url.split('@')[-1]} (раздел: {section})")
+    n_d = n_l = n_o = 0
     with psycopg.connect(url) as conn:
         with conn.cursor() as cur:
-            n_d = import_district(cur)
-            n_l = import_locations(cur)
-            n_o = import_objects(cur)
+            if section == "all":
+                n_d = import_district(cur)
+                n_l = import_locations(cur)
+                n_o = import_objects(cur)
+            n_a = import_amenities(cur)
         conn.commit()
 
-    print(f"Импортировано: districts={n_d}, locations={n_l}, cultural_objects={n_o}")
+    print(f"Импортировано: districts={n_d}, locations={n_l}, "
+          f"cultural_objects={n_o}, amenities={n_a}")
     with psycopg.connect(url) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT category, count(*) FROM cultural_objects GROUP BY category ORDER BY 2 DESC")
             for cat, cnt in cur.fetchall():
                 print(f"  {cat}: {cnt}")
+            cur.execute("SELECT category, count(*) FROM amenities GROUP BY category ORDER BY 2 DESC")
+            for cat, cnt in cur.fetchall():
+                print(f"  amenity {cat}: {cnt}")
             cur.execute(
                 "SELECT count(*) FROM cultural_objects c JOIN districts d ON ST_Within(c.geometry, d.geometry)"
             )

@@ -251,12 +251,12 @@ def test_query_other_is_recorded(monkeypatch, client):
         ai_api, "parse_with_fallback",
         lambda *a, **k: StructuredQuery.model_validate({"action": "other"}),
     )
-    res = client.post("/api/query", json={"query": "какая завтра погода"})
+    res = client.post("/api/query", json={"query": "переведи на английский"})
     assert res.status_code == 200
     assert res.json()["action"] == "other"
     entries = unrecognized.recent()
     assert entries[0]["kind"] == "other"
-    assert entries[0]["query"] == "какая завтра погода"
+    assert entries[0]["query"] == "переведи на английский"
 
 
 def test_query_unparsed_is_recorded(monkeypatch, client):

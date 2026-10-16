@@ -113,6 +113,48 @@ _THEME_WORDS: tuple[tuple[str, str], ...] = (
     ("искусств", "искусство"),
 )
 
+# --- идеи этапа H: заведения OSM (28) и погода (29) -------------------------
+
+# «где выпить кофе рядом с Эрмитажем», «кофейня поблизости», «есть ли туалет рядом»
+_AMENITY_WORDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("cafe", re.compile(r"кофе|кофейн|\bкафе\b", re.IGNORECASE)),
+    ("toilet", re.compile(r"туалет|уборн|\bwc\b", re.IGNORECASE)),
+    ("parking", re.compile(r"парковк|припарков|стоянк", re.IGNORECASE)),
+)
+# без «где/рядом/покажи» слово «кафе» может быть частью другого запроса
+# («музей, где есть кафе») — тогда заведение не ищем
+_AMENITY_CONTEXT_RE = re.compile(
+    r"\bгде\b|рядом|поблизост|недалек|близко|около|возле|вокруг|радиус|"
+    r"найди|найти|покажи|есть\s+ли|ищу|искать",
+    re.IGNORECASE,
+)
+# «какая погода», «что посмотреть в дождь», «будет ли дождь», «жарко ли»
+_WEATHER_RE = re.compile(
+    r"погод|дожд|снег|метел|градус|прогноз|зонт|жарк|холодн|мороз|"
+    r"солнечн|пасмурн|облачн|прохладн",
+    re.IGNORECASE,
+)
+# запрос про погоду хочет совет, что посмотреть («в дождь что делать»)
+_WEATHER_ADVICE_RE = re.compile(
+    r"посмотр|сходить|пойти|погуля|погулк|делать|заняться|куда|провести|успеть",
+    re.IGNORECASE,
+)
+
+
+def weather_advice_wanted(text: str | None) -> bool:
+    """Погодный запрос — про то, что посмотреть («что посмотреть в дождь»)."""
+    return bool(_WEATHER_ADVICE_RE.search(text or ""))
+
+
+def _find_amenity(text: str) -> str | None:
+    """Какое заведение ищут: кофе/туалет/парковка (нужен контекст «где/рядом»)."""
+    if not _AMENITY_CONTEXT_RE.search(text):
+        return None
+    for code, pattern in _AMENITY_WORDS:
+        if pattern.search(text):
+            return code
+    return None
+
 
 def _find_theme(text: str) -> str | None:
     low = text.lower()
@@ -377,6 +419,34 @@ def parse_rules(query: str, user_lat: float | None = None,
         metric = "newest" if _NEWEST_RE.search(text) and not _OLDEST_RE.search(text) else "oldest"
         base.update({"action": "analytics", "metric": metric,
                      "categories": categories or [], "limit": min(limit, 10)})
+        return _validate(base)
+
+    # --- идеи этапа H: заведения из OSM (28) и погода (29) ----------------
+
+    # «где выпить кофе рядом с Эрмитажем» — слои кафе/туалетов/парковок
+    amenity = _find_amenity(text)
+    if amenity:
+        base.update({
+            "action": "amenities",
+            "amenity": amenity,
+            "place": None if coords else _find_place(text),
+            "radius_meters": radius,
+            "limit": min(limit, 20),
+        })
+        if coords:
+            base.update({"latitude": coords[0], "longitude": coords[1]})
+        return _validate(base)
+
+    # «какая погода», «что посмотреть в дождь» — open-meteo (идея 29)
+    if _WEATHER_RE.search(text):
+        base.update({
+            "action": "weather",
+            "advice": weather_advice_wanted(text),
+            "place": None if coords else _find_place(text),
+            "radius_meters": radius,
+        })
+        if coords:
+            base.update({"latitude": coords[0], "longitude": coords[1]})
         return _validate(base)
 
     # --- идеи этапа G: «удиви меня», вкус, подборки, квесты ---------------

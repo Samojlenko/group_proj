@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { CATEGORY_LABELS } from "../constants";
-import type { GeoJsonFeature, WalkRouteResponse } from "../types";
+import { AMENITY_LABELS, CATEGORY_LABELS } from "../constants";
+import type { AmenityFeature, GeoJsonFeature, WalkRouteResponse } from "../types";
 import type { Theme } from "../lib/theme";
 import { addThemeBasemap } from "../lib/basemap";
 import type { Focus } from "../App";
@@ -17,6 +17,33 @@ export const CATEGORY_COLORS: Record<string, string> = {
 
 export function categoryColor(code: string): string {
   return CATEGORY_COLORS[code] ?? "#94a3b8";
+}
+
+/** Заведения OSM (идея 28): эмодзи-метка и цвет — мгновенно читаются на карте. */
+export const AMENITY_COLORS: Record<string, string> = {
+  cafe: "#f59e0b",
+  toilet: "#22d3ee",
+  parking: "#818cf8",
+};
+
+export const AMENITY_EMOJI: Record<string, string> = {
+  cafe: "☕",
+  toilet: "🚻",
+  parking: "🅿️",
+};
+
+export function amenityColor(code: string): string {
+  return AMENITY_COLORS[code] ?? "#94a3b8";
+}
+
+export function amenityEmoji(code: string): string {
+  return AMENITY_EMOJI[code] ?? "📍";
+}
+
+/** Подсветка заведений из ответа помощника (идея 28). */
+export interface AmenityFocus {
+  categories: string[];
+  ids: number[];
 }
 
 /** Центр Центрального района Санкт-Петербурга. */
@@ -45,6 +72,12 @@ interface Props {
   heatPoints: { latitude: number; longitude: number; weight: number }[] | null;
   /** добавить маркер при клике по карте (режим поиска в радиусе) */
   clickMode: boolean;
+  /** включённые слои заведений (идея 28): cafe/toilet/parking -> true */
+  amenityLayers: Record<string, boolean>;
+  /** данные слоя заведений (загружаются один раз при включении слоя) */
+  amenities: AmenityFeature[] | null;
+  /** подсветка заведений из ответа помощника: какие id обвести */
+  amenityFocus: AmenityFocus | null;
   onSelect: (id: number) => void;
   onMapClick: (lat: number, lon: number) => void;
 }
@@ -79,6 +112,9 @@ export default function CulturalMap({
   userLocation,
   heatPoints,
   clickMode,
+  amenityLayers,
+  amenities,
+  amenityFocus,
   onSelect,
   onMapClick,
 }: Props) {
@@ -92,6 +128,10 @@ export default function CulturalMap({
   const districtRef = useRef<L.LayerGroup | null>(null);
   /** слой «Прогулки»: линия маршрута и нумерованные остановки */
   const walkRef = useRef<L.LayerGroup | null>(null);
+  /** слой заведений OSM (идея 28): кафе/туалеты/парковки */
+  const amenitiesRef = useRef<L.LayerGroup | null>(null);
+  /** последняя подсветка заведений, по которой карта центрировалась */
+  const lastAmenityFitRef = useRef<string | null>(null);
   const heatReadyRef = useRef(false);
   const [heatReady, setHeatReady] = useState(false);
   const handlersRef = useRef({ onSelect, onMapClick, clickMode });
@@ -124,6 +164,7 @@ export default function CulturalMap({
     L.control.scale({ imperial: false }).addTo(map);
 
     markersRef.current = L.layerGroup().addTo(map);
+    amenitiesRef.current = L.layerGroup().addTo(map);
     radiusRef.current = L.layerGroup().addTo(map);
     userRef.current = L.layerGroup().addTo(map);
     heatRef.current = L.layerGroup().addTo(map);
@@ -228,6 +269,21 @@ export default function CulturalMap({
           ${f.properties.short_description ? `<div class="popup-desc">${escapeHtml(f.properties.short_description)}</div>` : ""}
           ${dist && dist > 0 ? `<div class="popup-row">Расстояние: <b>${fmtDist(dist)}</b></div>` : ""}
           <button class="btn popup-details" data-id="${f.id}">Подробнее →</button>
+        </div>`;
+  };
+
+  /** Popup заведения (идея 28): название, тип, адрес и часы работы. */
+  const amenityPopupHtml = (f: AmenityFeature): string => {
+    const catLabel = AMENITY_LABELS[f.properties.category] ?? f.properties.category;
+    return `
+        <div class="map-popup">
+          <div class="popup-head">
+            <span class="dot" style="background:${amenityColor(f.properties.category)}"></span>
+            <b>${escapeHtml(f.properties.name)}</b>
+          </div>
+          <div class="popup-cat">${escapeHtml(catLabel)}</div>
+          ${f.properties.address ? `<div class="popup-row">📍 ${escapeHtml(f.properties.address)}</div>` : ""}
+          ${f.properties.opening_hours ? `<div class="popup-row">🕒 ${escapeHtml(f.properties.opening_hours)}</div>` : ""}
         </div>`;
   };
 
@@ -482,6 +538,56 @@ export default function CulturalMap({
       lastFitRef.current = key;
     }
   }, [route]);
+
+  // слой заведений (идея 28): тумблеры над картой или ответ помощника
+  // («где выпить кофе рядом с Эрмитажем») включают категории автоматически
+  useEffect(() => {
+    const group = amenitiesRef.current;
+    if (!group) return;
+    group.clearLayers();
+    if (!amenityFocus) lastAmenityFitRef.current = null;
+    if (!amenities) return;
+
+    const focusIds = new Set(amenityFocus?.ids ?? []);
+    const focusCats = new Set(amenityFocus?.categories ?? []);
+    const points: [number, number][] = [];
+    for (const f of amenities) {
+      const cat = f.properties.category;
+      if (!amenityLayers[cat] && !focusCats.has(cat)) continue;
+      const [lon, lat] = f.geometry.coordinates;
+      const highlighted = focusIds.has(f.id);
+      if (highlighted) points.push([lat, lon]);
+      L.marker([lat, lon], {
+        icon: L.divIcon({
+          className: "amenity-marker",
+          html: `<span class="amenity-pin${highlighted ? " amenity-pin-hot" : ""}" style="--pin:${amenityColor(cat)}">${amenityEmoji(cat)}</span>`,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
+        }),
+        keyboard: false,
+      })
+        .bindTooltip(
+          `${escapeHtml(f.properties.name)}${
+            f.properties.opening_hours ? ` · ${escapeHtml(f.properties.opening_hours)}` : ""
+          }`,
+          { direction: "top", opacity: 0.95 },
+        )
+        .bindPopup(amenityPopupHtml(f), { maxWidth: 240 })
+        .addTo(group);
+    }
+
+    // ответ помощника: карта мягко центрируется на найденных заведениях
+    const key = amenityFocus ? `amenity:${amenityFocus.ids.join(",")}` : null;
+    if (key && points.length && key !== lastAmenityFitRef.current && mapRef.current) {
+      if (points.length > 1) {
+        mapRef.current.fitBounds(L.latLngBounds(points), { padding: [60, 60], maxZoom: 16 });
+      } else if (points[0]) {
+        mapRef.current.setView(points[0], 16);
+      }
+      lastAmenityFitRef.current = key;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amenities, amenityLayers, amenityFocus]);
 
   // радиусный поиск: круг + подсветка результатов
   useEffect(() => {

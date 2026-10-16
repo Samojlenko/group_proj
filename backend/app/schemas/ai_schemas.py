@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.schemas.amenity_schemas import AmenityItem
 from app.schemas.common import ObjectWithDistance
 from app.schemas.route_schemas import RouteResponse
+from app.schemas.weather_schemas import WeatherInfo
 
 
 class AIQueryRequest(BaseModel):
@@ -109,6 +111,13 @@ class AIQueryResponse(BaseModel):
     )
     quest: QuestResponse | None = Field(
         default=None, description="Квест (action=quest): точки, вопросы, подсказки (идея 27)"
+    )
+    amenities: list[AmenityItem] | None = Field(
+        default=None,
+        description="Заведения (action=amenities): кафе/туалеты/парковки из OSM (идея 28)",
+    )
+    weather: WeatherInfo | None = Field(
+        default=None, description="Погода (action=weather): open-meteo (идея 29)"
     )
 
 

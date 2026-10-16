@@ -6,6 +6,13 @@ export const CATEGORY_LABELS: Record<string, string> = {
   gallery: "Галереи",
 };
 
+/** Подписи заведений OSM-слоя (идея 28) — дублируют backend/app/constants.py. */
+export const AMENITY_LABELS: Record<string, string> = {
+  cafe: "Кафе",
+  toilet: "Туалеты",
+  parking: "Парковки",
+};
+
 /**
  * Ключевое слово, которым помечены мемориальные доски (подтип мемориала).
  * По умолчанию доски скрыты: их ~193 из 310 мемориалов, из-за них

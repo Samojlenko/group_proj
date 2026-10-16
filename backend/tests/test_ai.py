@@ -155,7 +155,7 @@ def test_query_other_action_returns_refusal(monkeypatch):
     )
     try:
         res = TestClient(app, raise_server_exceptions=False).post(
-            "/api/query", json={"query": "Какая завтра погода?"}
+            "/api/query", json={"query": "Переведи слово на английский"}
         )
         assert res.status_code == 200
         body = res.json()
