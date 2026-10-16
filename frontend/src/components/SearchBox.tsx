@@ -15,6 +15,8 @@ interface Props {
   categories?: string[];
   latitude?: number;
   longitude?: number;
+  /** ключевое слово-исключение: подсказки не должны предлагать скрытые доски */
+  notKeyword?: string;
   /** очистить поиск (кнопка ×) — App сбрасывает текст, фокус и подсветку */
   onClear?: () => void;
 }
@@ -51,6 +53,7 @@ export default function SearchBox({
   categories,
   latitude,
   longitude,
+  notKeyword,
   onClear,
 }: Props) {
   const [items, setItems] = useState<ObjectWithDistance[]>([]);
@@ -83,6 +86,7 @@ export default function SearchBox({
           latitude,
           longitude,
           limit: SUGGEST_LIMIT,
+          not_keyword: notKeyword,
         },
         controller.signal,
       )
@@ -105,7 +109,7 @@ export default function SearchBox({
       controller.abort();
     };
     // categories — массив, сравниваем по содержимому, иначе рефетч на каждый рендер
-  }, [value, categories?.join(","), latitude, longitude]);
+  }, [value, categories?.join(","), latitude, longitude, notKeyword]);
 
   // клик вне поля закрывает подсказки
   useEffect(() => {

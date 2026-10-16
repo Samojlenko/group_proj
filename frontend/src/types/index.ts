@@ -140,7 +140,8 @@ export interface AIQueryResponse {
   } | null;
   total: number;
   items: ObjectWithDistance[];
-  statistics?: Record<string, unknown> | null;
+  /** статистика по базе (заполняется для action="statistics", §36) */
+  statistics?: Statistics | null;
 }
 
 /** Ответ POST /api/recommend (§30) */
@@ -169,4 +170,30 @@ export interface GeoJsonFeature {
 export interface GeoJsonCollection {
   type: "FeatureCollection";
   features: GeoJsonFeature[];
+}
+
+/** «Прогулка»: остановка маршрута (ответ POST /api/route) */
+export interface RouteStop {
+  id: number;
+  name: string;
+  category: string;
+  latitude: number;
+  longitude: number;
+  /** расстояние от предыдущей точки, м */
+  leg_meters: number;
+  /** суммарно от старта, м */
+  cumulative_meters: number;
+  distance_from_start_meters?: number | null;
+}
+
+/** Ответ POST /api/route — пеший маршрут от точки */
+export interface WalkRouteResponse {
+  start: { latitude: number; longitude: number };
+  radius_meters: number;
+  count: number;
+  total_meters: number;
+  walk_minutes: number;
+  items: RouteStop[];
+  /** [широта, долгота] — старт и остановки по порядку */
+  polyline: [number, number][];
 }

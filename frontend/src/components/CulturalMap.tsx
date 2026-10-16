@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { CATEGORY_LABELS } from "../constants";
-import type { GeoJsonFeature } from "../types";
+import type { GeoJsonFeature, WalkRouteResponse } from "../types";
 import type { Focus } from "../App";
 
 /** Цвета маркеров по категориям (§6, §19). */
@@ -32,6 +32,8 @@ interface Props {
   radius: RadiusView | null;
   /** результаты AI/поиска/радиуса: подсветка, лучший объект, линии (§38, §39) */
   focus: Focus | null;
+  /** «Прогулка»: пеший маршрут от точки — линия и нумерованные остановки */
+  route: WalkRouteResponse | null;
   /** GeoJSON-граница Центрального района (§10, §38) */
   district: unknown;
   userLocation: [number, number] | null;
@@ -67,6 +69,7 @@ export default function CulturalMap({
   selectedId,
   radius,
   focus,
+  route,
   district,
   userLocation,
   heatPoints,
@@ -82,6 +85,8 @@ export default function CulturalMap({
   const heatRef = useRef<L.LayerGroup | null>(null);
   const focusRef = useRef<L.LayerGroup | null>(null);
   const districtRef = useRef<L.LayerGroup | null>(null);
+  /** слой «Прогулки»: линия маршрута и нумерованные остановки */
+  const walkRef = useRef<L.LayerGroup | null>(null);
   const heatReadyRef = useRef(false);
   const [heatReady, setHeatReady] = useState(false);
   const handlersRef = useRef({ onSelect, onMapClick, clickMode });
@@ -123,6 +128,7 @@ export default function CulturalMap({
     heatRef.current = L.layerGroup().addTo(map);
     focusRef.current = L.layerGroup().addTo(map);
     districtRef.current = L.layerGroup().addTo(map);
+    walkRef.current = L.layerGroup().addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       if (handlersRef.current.clickMode) {
@@ -397,6 +403,60 @@ export default function CulturalMap({
     }
     lastFitRef.current = key;
   }, [focus]);
+
+  // «Прогулка»: пунктирная линия маршрута и нумерованные остановки
+  useEffect(() => {
+    const group = walkRef.current;
+    if (!group) return;
+    group.clearLayers();
+    if (!route || route.items.length === 0) return;
+
+    const latlngs = route.polyline.map(([la, lo]) => L.latLng(la, lo));
+    // «бусины» вместо сплошной линии: lineCap round + короткий штрих
+    L.polyline(latlngs, {
+      color: "#2dd4bf",
+      weight: 4,
+      opacity: 0.9,
+      dashArray: "1 10",
+      lineCap: "round",
+    }).addTo(group);
+
+    // старт прогулки
+    L.circleMarker([route.start.latitude, route.start.longitude], {
+      radius: 8,
+      color: "#0f172a",
+      weight: 2,
+      fillColor: "#2dd4bf",
+      fillOpacity: 1,
+    })
+      .bindTooltip("Старт прогулки", { direction: "top" })
+      .addTo(group);
+
+    // остановки: номер в кружке, клик открывает карточку объекта
+    route.items.forEach((s, i) => {
+      const icon = L.divIcon({
+        className: "route-stop-icon",
+        html: `<span class="route-stop-badge">${i + 1}</span>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+      });
+      L.marker([s.latitude, s.longitude], { icon, keyboard: false })
+        .bindTooltip(
+          `${i + 1}. ${s.name} · ${fmtDist(s.cumulative_meters)} от старта`,
+          { direction: "top", offset: [0, -12] },
+        )
+        .on("click", () => handlersRef.current.onSelect(s.id))
+        .addTo(group);
+    });
+
+    // центрируем на маршруте только при новом построении,
+    // чтобы перерисовки не дёргали карту
+    const key = `route:${route.start.latitude},${route.start.longitude}:${route.items.map((s) => s.id).join(",")}`;
+    if (mapRef.current && key !== lastFitRef.current) {
+      mapRef.current.fitBounds(L.latLngBounds(latlngs), { padding: [60, 60], maxZoom: 16 });
+      lastFitRef.current = key;
+    }
+  }, [route]);
 
   // радиусный поиск: круг + подсветка результатов
   useEffect(() => {

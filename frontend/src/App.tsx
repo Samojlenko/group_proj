@@ -9,6 +9,7 @@ import ObjectPage from "./pages/ObjectPage";
 import { PLAQUE_KEYWORD } from "./constants";
 import {
   ApiError,
+  buildRoute,
   getCategories,
   getDensity,
   getDistrict,
@@ -31,6 +32,7 @@ import type {
   ObjectWithDistance,
   RadiusResponse,
   Statistics,
+  WalkRouteResponse,
 } from "./types";
 import { loadFavorites, toggleFavorite, type Favorites } from "./lib/favorites";
 
@@ -113,6 +115,9 @@ function MapShell() {
   const [radiusCenter, setRadiusCenter] = useState<[number, number] | null>(null);
   const [radiusResults, setRadiusResults] = useState<RadiusResponse | null>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  // «Прогулка»: пеший маршрут от центра радиуса
+  const [route, setRoute] = useState<WalkRouteResponse | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
 
   const [aiOpen, setAiOpen] = useState(false);
   const [heatOn, setHeatOn] = useState(false);
@@ -260,6 +265,8 @@ function MapShell() {
           latitude: userLocation?.[0],
           longitude: userLocation?.[1],
           limit: 30,
+          // доски, скрытые на карте, не должны попадать и в результаты поиска
+          not_keyword: filters.not_keyword,
         },
         controller.signal,
       )
@@ -285,7 +292,7 @@ function MapShell() {
           setError(e.message);
         });
     },
-    [filters.category, userLocation],
+    [filters.category, filters.not_keyword, userLocation],
   );
 
   /** Сброс текстового поиска: результаты, подсветка и поле ввода. */
@@ -386,6 +393,11 @@ function MapShell() {
 
   const handleMapClick = useCallback((lat: number, lon: number) => {
     setRadiusCenter([lat, lon]);
+    // новый центр — новое намерение: гасим подсветку и список поиска/AI,
+    // иначе старое «съедает» результаты радиуса на карте и в сайдборе
+    setAiFocus(null);
+    setSearchResults(null);
+    setSearchTotal(null);
   }, []);
   const handleLocate = useCallback(() => {
     if (!navigator.geolocation) {
@@ -398,12 +410,44 @@ function MapShell() {
         setUserLocation(coords);
         setRadiusCenter(coords);
         setRadiusMode(true);
+        setAiFocus(null);
+        setSearchResults(null);
+        setSearchTotal(null);
         setError(null);
       },
       (err) => setError(`Геолокация: ${err.message}`),
       { enableHighAccuracy: true, timeout: 8000 },
     );
   }, []);
+
+  // новый центр радиуса — старая прогулка больше не актуальна
+  useEffect(() => {
+    setRoute(null);
+  }, [radiusCenter]);
+
+  const buildWalk = useCallback(
+    (count: number) => {
+      if (!radiusCenter) return;
+      setRouteLoading(true);
+      buildRoute({
+        latitude: radiusCenter[0],
+        longitude: radiusCenter[1],
+        // прогулка интересна в разумном радиусе: не отправляем человека за 5 км
+        radius_meters: Math.min(Math.max(radiusMeters, 600), 3000),
+        count,
+        categories: filters.category?.length ? filters.category : undefined,
+        not_keyword: filters.not_keyword,
+      })
+        .then(setRoute)
+        .catch((e: unknown) =>
+          setError(e instanceof ApiError ? e.detail : (e as Error).message),
+        )
+        .finally(() => setRouteLoading(false));
+    },
+    [radiusCenter, radiusMeters, filters.category, filters.not_keyword],
+  );
+
+  const clearRoute = useCallback(() => setRoute(null), []);
 
   const navigate = useNavigate();
   const openPage = useCallback((id: number) => navigate(`/object/${id}`), [navigate]);
@@ -428,6 +472,7 @@ function MapShell() {
           categories={filters.category}
           latitude={userLocation?.[0]}
           longitude={userLocation?.[1]}
+          notKeyword={filters.not_keyword}
         />
         <div className="health-badges">
           <button
@@ -439,8 +484,16 @@ function MapShell() {
           {healthChecked && health === null && (
             <span className="badge error">Нет связи с сервером</span>
           )}
-          {health !== null && health.status !== "ok" && (
+          {health !== null && health.database !== "ok" && (
             <span className="badge error">Сервис временно недоступен</span>
+          )}
+          {health !== null && health.database === "ok" && health.ai_available === false && (
+            <span
+              className="badge"
+              title="Ollama не запущена: запросы к ИИ разбираются шаблонами (§53), остальной сервис работает полностью"
+            >
+              Без ИИ
+            </span>
           )}
         </div>
       </header>
@@ -469,12 +522,20 @@ function MapShell() {
           onToggleRadiusMode={() => {
             setRadiusMode((v) => !v);
             if (radiusMode) setRadiusCenter(null);
+            // смена режима — смена намерения: старые подсветки и списки поиска
+            // больше не главные, иначе радиус не виден на карте
             setAiFocus(null);
+            setSearchResults(null);
+            setSearchTotal(null);
           }}
           radiusMeters={radiusMeters}
           onRadiusChange={setRadiusMeters}
           radiusResults={radiusResults}
           onLocate={handleLocate}
+          route={route}
+          routeLoading={routeLoading}
+          onBuildRoute={buildWalk}
+          onClearRoute={clearRoute}
         />
 
         <div className="map-wrap">
@@ -483,6 +544,7 @@ function MapShell() {
             selectedId={selectedId}
             radius={radiusView}
             focus={focus}
+            route={route}
             district={districtOn ? district : null}
             userLocation={userLocation}
             heatPoints={heatPoints}
@@ -539,6 +601,7 @@ function MapShell() {
           mapLatitude={radiusCenter?.[0] ?? null}
           mapLongitude={radiusCenter?.[1] ?? null}
           categories={filters.category}
+          notKeyword={filters.not_keyword}
         />
 
         <ObjectCard
@@ -550,6 +613,7 @@ function MapShell() {
           onOpenPage={openPage}
           isFavorite={selectedObject ? favorites.has(selectedObject.id) : false}
           onToggleFavorite={toggleFav}
+          notKeyword={filters.not_keyword}
         />
       </div>
     </div>

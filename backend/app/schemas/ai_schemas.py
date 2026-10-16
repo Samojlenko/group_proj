@@ -20,6 +20,11 @@ class AIQueryRequest(BaseModel):
     )
     map_longitude: float | None = Field(default=None, ge=-180, le=180)
     session_id: str | None = Field(default=None, description="Идентификатор диалога (§40)")
+    not_keyword: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Исключить объекты с этим ключевым словом (доски скрыты в UI по умолчанию)",
+    )
 
 
 class AIQueryResponse(BaseModel):
@@ -48,6 +53,11 @@ class RecommendRequest(BaseModel):
     map_longitude: float | None = Field(default=None, ge=-180, le=180)
     radius_meters: float | None = Field(default=None, gt=0, le=10000)
     limit: int = Field(default=10, ge=1, le=100)
+    not_keyword: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Исключить объекты с этим ключевым словом (доски скрыты в UI по умолчанию)",
+    )
 
 
 class RecommendedItem(ObjectWithDistance):

@@ -208,11 +208,13 @@ def geojson_objects(db: Session, **filters) -> dict:
 
 
 def nearby_objects(
-    db: Session, lat: float, lon: float, *, categories: list[str] | None = None, limit: int = 10
+    db: Session, lat: float, lon: float, *, categories: list[str] | None = None,
+    not_keyword: str | None = None, limit: int = 10
 ) -> list[dict]:
     """§11.1: ближайшие объекты — KNN-сортировка по GiST-индексу (метры)."""
     where, params = _filters_sql(
         categories=categories, q=None, theme=None, keyword=None,
+        not_keyword=not_keyword,
         has_website=None, has_description=None, within_district=False,
     )
     params.update(_point_params(lat, lon))
@@ -298,11 +300,13 @@ def near_object(
     radius_m: float,
     *,
     categories: list[str] | None = None,
+    not_keyword: str | None = None,
     limit: int = 100,
 ) -> list[dict]:
     """§14: объекты рядом с другим объектом («Что рядом?», §34)."""
     where, params = _filters_sql(
         categories=categories, q=None, theme=None, keyword=None,
+        not_keyword=not_keyword,
         has_website=None, has_description=None, within_district=False,
     )
     params.update({"base": object_id, "radius": radius_m, "limit": limit})
@@ -320,17 +324,28 @@ def near_object(
     return [dict(r) for r in _run(db, sql, params)]
 
 
-def counts_near_object(db: Session, object_id: int, radius_m: float) -> dict[str, int]:
-    """§34: группировка «что рядом» по категориям (Музеи — 7, ...)."""
-    sql = """
+def counts_near_object(
+    db: Session, object_id: int, radius_m: float, *, not_keyword: str | None = None
+) -> dict[str, int]:
+    """§34: группировка «что рядом» по категориям (Музеи — 7, ...).
+
+    ``not_keyword`` — тот же фильтр, что на карте: счётчики должны сходиться
+    с видимыми маркерами (по умолчанию скрыты мемориальные доски).
+    """
+    params: dict = {"base": object_id, "radius": radius_m}
+    extra = ""
+    if not_keyword:
+        extra = "AND NOT (coalesce(c.keywords, '{}') @> ARRAY[:not_keyword]::text[])"
+        params["not_keyword"] = not_keyword
+    sql = f"""
     WITH base AS (SELECT geog FROM cultural_objects WHERE id = :base)
     SELECT c.category, count(*) AS n
     FROM cultural_objects c CROSS JOIN base
-    WHERE c.id <> :base AND ST_DWithin(c.geog, base.geog, :radius)
+    WHERE c.id <> :base AND ST_DWithin(c.geog, base.geog, :radius) {extra}
     GROUP BY c.category
     ORDER BY n DESC
     """
-    return {r["category"]: r["n"] for r in _run(db, sql, {"base": object_id, "radius": radius_m})}
+    return {r["category"]: r["n"] for r in _run(db, sql, params)}
 
 
 def text_search(
@@ -338,6 +353,7 @@ def text_search(
     query: str,
     *,
     categories: list[str] | None = None,
+    not_keyword: str | None = None,
     limit: int = 20,
     lat: float | None = None,
     lon: float | None = None,
@@ -349,6 +365,7 @@ def text_search(
     """
     where, params = _filters_sql(
         categories=categories, q=None, theme=None, keyword=None,
+        not_keyword=not_keyword,
         has_website=None, has_description=None, within_district=False,
     )
     params.update({"tsq": query, "like": f"%{query}%", "limit": limit})

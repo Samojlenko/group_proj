@@ -93,10 +93,34 @@ def _prefer_map(payload: AIQueryRequest) -> bool:
     return payload.map_latitude is not None and is_deictic(payload.query)
 
 
+def _not_keyword(query: str | None, not_keyword: str | None) -> str | None:
+    """Скрытые подтипы (мемориальные доски) не должны попадать в выдачу AI —
+    иначе «Найдено: 310», а на карте подсвечено 117.
+
+    Исключение: человек явно спросил про доски («покажи мемориальные доски») —
+    тогда фильтр снимаем, он должен их увидеть.
+    """
+    if query and "доск" in query.lower():
+        return None
+    return not_keyword
+
+
 def _origin(payload: AIQueryRequest, sq: StructuredQuery) -> tuple[float | None, float | None]:
     """Точка отсчёта запроса — с учётом того, что человек указал точку на карте."""
+    sq_lat, sq_lon = sq.latitude, sq.longitude
+    if _prefer_map(payload) and sq_lat is not None and sq_lon is not None:
+        # модель могла просто повторить GPS («рядом с этой точкой» она иногда
+        # трактует как «рядом со мной») — тогда координаты не ее выбор, а эхо:
+        # человек имел в виду точку на карте, она и должна победить
+        if (
+            payload.latitude is not None
+            and payload.longitude is not None
+            and abs(sq_lat - payload.latitude) < 1e-6
+            and abs(sq_lon - payload.longitude) < 1e-6
+        ):
+            sq_lat, sq_lon = None, None
     return _pick_coords(
-        sq.latitude, sq.longitude,
+        sq_lat, sq_lon,
         payload.latitude, payload.longitude,
         payload.map_latitude, payload.map_longitude,
         prefer_map=_prefer_map(payload),
@@ -220,6 +244,9 @@ def ai_query(
     # помечаем, что запрос разобран шаблонами, а не моделью (§53)
     fallback_note = " (запрос разобран шаблонами: AI-модель недоступна, §53)" if fallback_used else ""
 
+    # скрытые подтипы (мемориальные доски) отсекаются так же, как на карте (§8)
+    not_kw = _not_keyword(payload.query, payload.not_keyword)
+
     # запрос вне зоны компетенции сервиса: внятный отказ вместо пустого списка
     if sq.action == "other":
         return {
@@ -246,7 +273,7 @@ def ai_query(
             "resolved_place": None,
             "total": 1,
             "items": [],
-            "statistics": q.statistics(db),
+            "statistics": q.statistics(db, not_keyword=not_kw),
         }
 
     if sq.action == "recommend":
@@ -259,6 +286,7 @@ def ai_query(
             latitude=lat, longitude=lon,
             radius_meters=sq.radius_meters,
             limit=limit,
+            not_keyword=not_kw,
         )
         target = f" около «{place['label']}»" if place else ""
         return {
@@ -283,6 +311,7 @@ def ai_query(
             db, categories=categories, theme=sq.theme, keyword=sq.keyword,
             has_website=sq.has_website, has_description=sq.has_description,
             within_district=sq.within_district, limit=limit, lat=lat, lon=lon,
+            not_keyword=not_kw,
         )
         explanation = f"Список объектов: {_labels(sq.categories)}"
         if sq.within_district:
@@ -295,7 +324,8 @@ def ai_query(
             logger.warning("action=search без text: %s", sq.model_dump())
             raise HTTPException(422, PARSE_FAILED_HINT)
         items, total = q.text_search(
-            db, sq.text, categories=categories, limit=limit, lat=lat, lon=lon
+            db, sq.text, categories=categories, not_keyword=not_kw,
+            limit=limit, lat=lat, lon=lon,
         )
         explanation = f"Полнотекстовый поиск по запросу «{sq.text}»"
 
@@ -309,6 +339,7 @@ def ai_query(
             raise HTTPException(400, f"Радиус больше допустимого ({settings.max_radius_meters:.0f} м)")
         items, total, _in_radius = q.radius_objects(
             db, lat, lon, radius, categories=categories, limit=limit,
+            not_keyword=not_kw,
         )
         # человек должен видеть, откуда посчитано: «точки на карте» — это
         # та точка, которую он поставил, а не его геолокация
@@ -382,6 +413,7 @@ def recommend(
         longitude=lon,
         radius_meters=payload.radius_meters,
         limit=min(payload.limit, settings.max_limit),
+        not_keyword=_not_keyword(payload.query, payload.not_keyword),
     )
     weights = {
         "semantic": result["weights"]["sem"] if result["components"]["semantic"] else 0.0,

@@ -9,7 +9,7 @@ import {
   recommend,
 } from "../api/client";
 import { categoryColor } from "../components/CulturalMap";
-import { CATEGORY_LABELS } from "../constants";
+import { CATEGORY_LABELS, PLAQUE_KEYWORD } from "../constants";
 import { loadFavorites, toggleFavorite } from "../lib/favorites";
 import type { CulturalObject, ObjectWithDistance, RecommendResponse } from "../types";
 
@@ -58,6 +58,8 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
     setError(null);
     setObject(null);
     setImgBroken(false);
+    // переход между объектами начинается с начала страницы
+    window.scrollTo({ top: 0 });
     getObject(objectId)
       .then((o) => alive && setObject(o))
       .catch((e: Error) => {
@@ -73,7 +75,7 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
   // «Что рядом?» с выбором радиуса (§34)
   useEffect(() => {
     let alive = true;
-    getWhatNearby(objectId, radius)
+    getWhatNearby(objectId, radius, PLAQUE_KEYWORD)
       .then((wn) => {
         if (!alive) return;
         setNearby(wn.items);
@@ -94,6 +96,7 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
       latitude: object.latitude,
       longitude: object.longitude,
       limit: 6,
+      not_keyword: PLAQUE_KEYWORD,
     })
       .then((r) => {
         if (alive) setSimilar({ ...r, items: r.items.filter((i) => i.id !== object.id) });
@@ -101,7 +104,11 @@ export default function ObjectPage({ objectId, onBack, onOpen }: Props) {
       .catch(() => {
         // AI недоступен → просто ближайшие объекты той же категории (§53)
         if (!alive) return;
-        getNearby(object.latitude, object.longitude, { category: [object.category], limit: 6 })
+        getNearby(object.latitude, object.longitude, {
+          category: [object.category],
+          limit: 6,
+          not_keyword: PLAQUE_KEYWORD,
+        })
           .then((rows) =>
             setSimilar({
               items: rows.filter((r) => r.id !== object.id),

@@ -125,10 +125,16 @@ export function getObject(id: number): Promise<CulturalObject> {
 export function getNearby(
   latitude: number,
   longitude: number,
-  opts: { category?: string[]; limit?: number } = {},
+  opts: { category?: string[]; limit?: number; not_keyword?: string } = {},
 ): Promise<import("../types").ObjectWithDistance[]> {
   return request(
-    `/objects/nearby${toQuery({ latitude, longitude, category: opts.category, limit: opts.limit })}`,
+    `/objects/nearby${toQuery({
+      latitude,
+      longitude,
+      category: opts.category,
+      limit: opts.limit,
+      not_keyword: opts.not_keyword,
+    })}`,
   );
 }
 
@@ -161,7 +167,13 @@ export function getRadius(
 
 export function searchObjects(
   q: string,
-  opts: { category?: string[]; latitude?: number; longitude?: number; limit?: number } = {},
+  opts: {
+    category?: string[];
+    latitude?: number;
+    longitude?: number;
+    limit?: number;
+    not_keyword?: string;
+  } = {},
   signal?: AbortSignal,
 ): Promise<SearchResponse> {
   return request(
@@ -171,13 +183,23 @@ export function searchObjects(
       latitude: opts.latitude,
       longitude: opts.longitude,
       limit: opts.limit,
+      not_keyword: opts.not_keyword,
     })}`,
     { signal },
   );
 }
 
-export function getWhatNearby(objectId: number, radiusMeters = 1000): Promise<WhatNearbyResponse> {
-  return request(`/objects/${objectId}/nearby${toQuery({ radius_meters: radiusMeters })}`);
+export function getWhatNearby(
+  objectId: number,
+  radiusMeters = 1000,
+  notKeyword?: string,
+): Promise<WhatNearbyResponse> {
+  return request(
+    `/objects/${objectId}/nearby${toQuery({
+      radius_meters: radiusMeters,
+      not_keyword: notKeyword,
+    })}`,
+  );
 }
 
 export function getDistance(idA: number, idB: number): Promise<DistanceResult> {
@@ -194,6 +216,8 @@ export interface AIQueryPayload {
   map_latitude?: number | null;
   map_longitude?: number | null;
   session_id?: string | null;
+  /** ключевое слово-исключение (мемориальные доски скрыты в UI по умолчанию) */
+  not_keyword?: string | null;
 }
 
 export function aiQuery(
@@ -212,6 +236,8 @@ export interface RecommendPayload {
   map_longitude?: number | null;
   radius_meters?: number | null;
   limit?: number;
+  /** ключевое слово-исключение (мемориальные доски скрыты в UI по умолчанию) */
+  not_keyword?: string | null;
 }
 
 export function recommend(
@@ -251,4 +277,26 @@ export function getNeighbours(): Promise<{
 /** Граница Центрального района (§10, §38) — GeoJSON-полигон. */
 export function getDistrict(): Promise<GeoJsonCollection & { features: { geometry: unknown }[] }> {
   return request(`/district`);
+}
+
+// --- «Прогулка» ---------------------------------------------------------------
+
+export interface RoutePayload {
+  latitude: number;
+  longitude: number;
+  /** радиус поиска объектов от точки старта, м */
+  radius_meters?: number;
+  /** сколько остановок в маршруте (2–12) */
+  count?: number;
+  categories?: string[];
+  /** ключевое слово-исключение: не звать в прогулку скрытые доски */
+  not_keyword?: string | null;
+}
+
+/** Строит пеший маршрут по объектам вокруг точки старта. */
+export function buildRoute(
+  payload: RoutePayload,
+  signal?: AbortSignal,
+): Promise<import("../types").WalkRouteResponse> {
+  return request(`/route`, { method: "POST", body: JSON.stringify(payload), signal });
 }

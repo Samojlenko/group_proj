@@ -44,6 +44,7 @@ def recommend(
     longitude: float | None = None,
     radius_meters: float | None = None,
     limit: int = 10,
+    not_keyword: str | None = None,
 ) -> dict:
     """Возвращает {"items", "weights", "components"}.
 
@@ -89,6 +90,12 @@ def recommend(
     if radius_meters and has_point:
         params["radius"] = radius_meters
         where_bits.append("ST_DWithin(c.geog, CAST(:point AS geography), :radius)")
+
+    if not_keyword:
+        # доски и прочие служебные подтипы не должны попадать в рекомендации,
+        # если скрыты на карте (счётчики и списки сходятся)
+        params["not_keyword"] = not_keyword
+        where_bits.append("NOT (coalesce(c.keywords, '{}') @> ARRAY[:not_keyword]::text[])")
 
     if categories:
         names = [f"cat_{i}" for i in range(len(categories))]

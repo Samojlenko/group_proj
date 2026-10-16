@@ -175,6 +175,9 @@ def nearby(
     latitude: float = Query(..., description="Широта"),
     longitude: float = Query(..., description="Долгота"),
     category: list[str] | None = Query(default=None),
+    not_keyword: str | None = Query(
+        default=None, description="Исключить объекты с этим ключевым словом"
+    ),
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -182,7 +185,10 @@ def nearby(
     validate_coords(latitude, longitude)
     limit = validate_limit(limit, settings)
     rows = sq.nearby_objects(
-        db, latitude, longitude, categories=validate_categories(category), limit=limit
+        db, latitude, longitude,
+        categories=validate_categories(category),
+        not_keyword=not_keyword,
+        limit=limit,
     )
     return [_with_distance(r) for r in rows]
 
@@ -233,6 +239,9 @@ def radius(
 def search(
     q: str = Query(..., min_length=2, description="Текст запроса"),
     category: list[str] | None = Query(default=None),
+    not_keyword: str | None = Query(
+        default=None, description="Исключить объекты с этим ключевым словом"
+    ),
     latitude: float | None = Query(default=None),
     longitude: float | None = Query(default=None),
     limit: int = Query(default=20, ge=1),
@@ -247,6 +256,7 @@ def search(
         db,
         q.strip(),
         categories=validate_categories(category),
+        not_keyword=not_keyword,
         limit=validate_limit(limit, settings),
         lat=latitude,
         lon=longitude,
@@ -284,6 +294,9 @@ def object_nearby(
     object_id: int,
     radius_meters: float = Query(default=1000, gt=0),
     category: list[str] | None = Query(default=None),
+    not_keyword: str | None = Query(
+        default=None, description="Исключить объекты с этим ключевым словом"
+    ),
     limit: int = Query(default=100, ge=1),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -292,9 +305,12 @@ def object_nearby(
     validate_radius(radius_meters, settings)
     limit = validate_limit(limit, settings)
     items = sq.near_object(
-        db, object_id, radius_meters, categories=validate_categories(category), limit=limit
+        db, object_id, radius_meters,
+        categories=validate_categories(category),
+        not_keyword=not_keyword,
+        limit=limit,
     )
-    counts = sq.counts_near_object(db, object_id, radius_meters)
+    counts = sq.counts_near_object(db, object_id, radius_meters, not_keyword=not_keyword)
     return {
         "object_id": object_id,
         "radius_meters": radius_meters,

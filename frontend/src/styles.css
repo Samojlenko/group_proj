@@ -487,6 +487,113 @@ body {
   border-radius: 999px;
 }
 
+.chip-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+
+/* --- «Прогулка»: чипы, панель маршрута, бейджи остановок на карте --- */
+
+.chip-button {
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.chip-button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.chip-button.chip-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b1220;
+  font-weight: 600;
+}
+
+.radius-time-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.walk-controls {
+  margin-top: 10px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.walk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.walk-head .chips {
+  display: flex;
+  gap: 6px;
+}
+
+.walk-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.walk-summary {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.walk-num {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #2dd4bf;
+  color: #0b1220;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.route-stop-icon {
+  background: transparent;
+  border: none;
+}
+
+.route-stop-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #2dd4bf;
+  color: #0b1220;
+  font-weight: 700;
+  font-size: 12px;
+  border: 2px solid #f0fdfa;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.route-stop-badge:hover {
+  background: #5eead4;
+}
+
 .card-source {
   font-size: 11px;
   margin-top: 10px;
@@ -694,6 +801,36 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.ai-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.ai-stats-total {
+  margin: 0;
+  font-size: 13px;
+}
+
+.ai-stats-total b {
+  font-size: 16px;
+}
+
+.ai-stats-extra {
+  font-size: 11px;
+  margin: 0;
+}
+
+.ai-stats .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .score-bar {

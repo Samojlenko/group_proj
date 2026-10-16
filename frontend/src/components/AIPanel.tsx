@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, aiQuery, recommend } from "../api/client";
 import type { Focus } from "../App";
 import { categoryColor } from "./CulturalMap";
+import { CATEGORY_LABELS } from "../constants";
 import type { AIQueryResponse, ObjectWithDistance, RecommendResponse } from "../types";
 
 interface Props {
@@ -19,6 +20,8 @@ interface Props {
   mapLatitude?: number | null;
   mapLongitude?: number | null;
   categories?: string[];
+  /** ключевое слово-исключение: не показывать скрытые на карте объекты (доски) */
+  notKeyword?: string;
 }
 
 /** Примеры запросов для первого знакомства (§40). */
@@ -126,6 +129,7 @@ export default function AIPanel({
   mapLatitude,
   mapLongitude,
   categories,
+  notKeyword,
 }: Props) {
   /** точка, поставленная на карте, — приоритетный центр для «рядом с этой точкой» */
   const mapPoint: [number, number] | null =
@@ -173,6 +177,7 @@ export default function AIPanel({
           map_latitude: mapLatitude,
           map_longitude: mapLongitude,
           limit: 10,
+          not_keyword: notKeyword,
         });
         setRecs(res);
         onFocus(
@@ -192,18 +197,23 @@ export default function AIPanel({
         longitude,
         map_latitude: mapLatitude,
         map_longitude: mapLongitude,
+        not_keyword: notKeyword,
       });
       setResult(res);
-      onFocus(
-        toFocus(
-          res.items,
-          `AI: «${q}»`,
-          res.resolved_place,
-          latitude ?? null,
-          longitude ?? null,
-          mapPoint,
-        ),
-      );
+      // подсвечиваем карту, только если есть что подсвечивать: у статистики
+      // и отказа items пустые, и старая подсветка не должна гаснуть зря
+      if (res.items.length > 0) {
+        onFocus(
+          toFocus(
+            res.items,
+            `AI: «${q}»`,
+            res.resolved_place,
+            latitude ?? null,
+            longitude ?? null,
+            mapPoint,
+          ),
+        );
+      }
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : (e as Error).message);
     } finally {
@@ -356,7 +366,29 @@ export default function AIPanel({
           {result.action !== "other" && result.total === 0 && (
             <p className="muted">Ничего не найдено — уточните запрос.</p>
           )}
-          {result.total > 0 && (
+
+          {/* статистика (§36): цифры, а не только объяснение */}
+          {result.action === "statistics" && result.statistics && (
+            <div className="ai-stats">
+              <p className="ai-stats-total">
+                Всего объектов: <b>{result.statistics.total}</b>
+              </p>
+              <div className="chips">
+                {Object.entries(result.statistics.by_category ?? {}).map(([code, n]) => (
+                  <span key={code} className="chip">
+                    <span className="chip-dot" style={{ background: categoryColor(code) }} />
+                    {CATEGORY_LABELS[code] ?? code}: {n}
+                  </span>
+                ))}
+              </div>
+              <p className="muted ai-stats-extra">
+                С сайтом: {result.statistics.with_website} · с описанием:{" "}
+                {result.statistics.with_description}
+              </p>
+            </div>
+          )}
+
+          {result.items.length > 0 && (
             <ul className="ai-items">
               {result.items.map((it) => (
                 <ItemRow key={it.id} item={it} onSelect={onSelect} />

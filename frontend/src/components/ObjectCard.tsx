@@ -15,6 +15,8 @@ interface Props {
   /** избранное (localStorage) */
   isFavorite: boolean;
   onToggleFavorite: (id: number) => void;
+  /** ключевое слово-исключение: счётчики должны сходиться с видимыми маркерами */
+  notKeyword?: string;
 }
 
 /** Радиусы «Что рядом?» по ТЗ (§34). */
@@ -46,6 +48,7 @@ function Row({ label, value }: { label: string; value?: string | null }) {
  */
 export default function ObjectCard({
   object, loading, error, onClose, onSelect, onOpenPage, isFavorite, onToggleFavorite,
+  notKeyword,
 }: Props) {
   const [nearby, setNearby] = useState<WhatNearbyResponse | null>(null);
   const [nearbyError, setNearbyError] = useState<string | null>(null);
@@ -58,7 +61,7 @@ export default function ObjectCard({
     setImgBroken(false);
     if (!object) return;
     const controller = new AbortController();
-    getWhatNearby(object.id, radius)
+    getWhatNearby(object.id, radius, notKeyword)
       .then((r) => {
         if (!controller.signal.aborted) setNearby(r);
       })
@@ -68,7 +71,7 @@ export default function ObjectCard({
         }
       });
     return () => controller.abort();
-  }, [object?.id, radius]);
+  }, [object?.id, radius, notKeyword]);
 
   if (loading && !object) {
     return (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { PLAQUE_KEYWORD } from "../constants";
 import { categoryColor } from "./CulturalMap";
 import type {
@@ -8,6 +8,7 @@ import type {
   ObjectWithDistance,
   RadiusResponse,
   Statistics,
+  WalkRouteResponse,
 } from "../types";
 
 interface Props {
@@ -42,7 +43,22 @@ interface Props {
   onRadiusChange: (m: number) => void;
   radiusResults: RadiusResponse | null;
   onLocate: () => void;
+  /** «Прогулка»: построенный пеший маршрут и его состояние */
+  route: WalkRouteResponse | null;
+  routeLoading: boolean;
+  onBuildRoute: (count: number) => void;
+  onClearRoute: () => void;
 }
+
+/** Сколько остановок предлагать в «Прогулке». */
+const WALK_COUNTS = [5, 7, 9];
+
+/** Перевод «время пешком → радиус» при скорости ~5 км/ч. */
+const TIME_CHIPS = [
+  { m: 1250, label: "15 мин", hint: "≈ 1,25 км" },
+  { m: 2500, label: "30 мин", hint: "≈ 2,5 км" },
+  { m: 5000, label: "1 час", hint: "≈ 5 км" },
+];
 
 function fmtDist(m?: number | null): string {
   if (m === null || m === undefined) return "";
@@ -60,6 +76,7 @@ function ListRow({
   onOpenPage,
   isFavorite,
   onToggleFavorite,
+  prefix,
 }: {
   id: number;
   name: string;
@@ -70,10 +87,13 @@ function ListRow({
   onOpenPage: (id: number) => void;
   isFavorite: boolean;
   onToggleFavorite: (id: number) => void;
+  /** бейдж перед названием (номер остановки прогулки) */
+  prefix?: ReactNode;
 }) {
   return (
     <li className={selected ? "selected" : ""}>
       <button className="list-item" onClick={() => onSelect(id)}>
+        {prefix}
         <span className="dot" style={{ background: categoryColor(category) }} />
         <span className="list-name">{name}</span>
         <span className="muted">{fmtDist(distance)}</span>
@@ -107,9 +127,11 @@ export default function Sidebar(props: Props) {
     selectedId, onSelect, onOpenPage, searchResults, searchTotal,
     radiusMode, onToggleRadiusMode, radiusMeters, onRadiusChange,
     radiusResults, onLocate,
+    route, routeLoading, onBuildRoute, onClearRoute,
     favorites, onToggleFavorite, onlyFavorites, onToggleOnlyFavorites,
   } = props;
   const [statsOpen, setStatsOpen] = useState(false);
+  const [walkCount, setWalkCount] = useState(7);
 
   const selected = new Set(filters.category ?? []);
   const toggleCategory = (code: string) => {
@@ -119,8 +141,49 @@ export default function Sidebar(props: Props) {
     onFiltersChange({ ...filters, category: [...next] });
   };
 
-  const showRadiusList = radiusMode && radiusResults;
   const showSearchList = searchResults !== null;
+  const showRouteList = !showSearchList && radiusMode && route !== null;
+  const showRadiusList = !showSearchList && radiusMode && radiusResults !== null && !showRouteList;
+
+  /** Выгрузка прогулки в GeoJSON: линия маршрута + нумерованные остановки. */
+  const exportRoute = () => {
+    if (!route) return;
+    const geo = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: route.polyline.map(([la, lo]) => [lo, la]),
+          },
+          properties: {
+            name: "Прогулка",
+            total_meters: route.total_meters,
+            walk_minutes: route.walk_minutes,
+          },
+        },
+        ...route.items.map((s, i) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [s.longitude, s.latitude] },
+          properties: {
+            number: i + 1,
+            name: s.name,
+            category: s.category,
+            leg_meters: s.leg_meters,
+            cumulative_meters: s.cumulative_meters,
+          },
+        })),
+      ],
+    };
+    const blob = new Blob([JSON.stringify(geo, null, 2)], { type: "application/geo+json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `walk-route-${route.count}.geojson`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <aside className="side-panel">
@@ -142,7 +205,60 @@ export default function Sidebar(props: Props) {
               value={radiusMeters}
               onChange={(e) => onRadiusChange(Number(e.target.value))}
             />
+            {/* время пешком вместо метров: понятнее, чем «2500 м» */}
+            <div className="chips radius-time-chips">
+              {TIME_CHIPS.map((c) => (
+                <button
+                  key={c.m}
+                  className={`chip chip-button ${Math.abs(radiusMeters - c.m) < 1 ? "chip-active" : ""}`}
+                  title={`Пешком ~5 км/ч: ${c.label} ${c.hint}`}
+                  onClick={() => onRadiusChange(c.m)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
             <p className="muted small-note">Кликните по карте, чтобы выбрать центр.</p>
+
+            {/* «Прогулка»: пеший маршрут по ближайшим объектам от центра */}
+            <div className="walk-controls">
+              <div className="walk-head">
+                <span className="muted">Прогулка:</span>
+                <div className="chips">
+                  {WALK_COUNTS.map((n) => (
+                    <button
+                      key={n}
+                      className={`chip chip-button ${walkCount === n ? "chip-active" : ""}`}
+                      title={`${n} остановок в маршруте`}
+                      onClick={() => setWalkCount(n)}
+                    >
+                      {n} точек
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                className="btn wide"
+                disabled={routeLoading}
+                onClick={() => onBuildRoute(walkCount)}
+                title="Пеший маршрут по ближайшим объектам вокруг выбранного центра"
+              >
+                {routeLoading ? "Строю маршрут…" : "Построить прогулку"}
+              </button>
+              {route && (
+                <div className="walk-actions">
+                  <span className="walk-summary">
+                    ≈ {fmtDist(route.total_meters)} · ~{route.walk_minutes} мин пешком
+                  </span>
+                  <button className="link-button" onClick={exportRoute}>
+                    GeoJSON
+                  </button>
+                  <button className="link-button" onClick={onClearRoute}>
+                    Сбросить
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
         <button className="btn btn-ghost wide" onClick={onLocate}>
@@ -331,9 +447,11 @@ export default function Sidebar(props: Props) {
         <h3>
           {showSearchList
             ? `Найдено: ${searchTotal ?? searchResults!.length}`
-            : showRadiusList
-              ? `В радиусе: ${radiusResults!.total}`
-              : `Объекты: ${total}`}
+            : showRouteList
+              ? `Прогулка: ${route!.count} точек · ~${route!.walk_minutes} мин`
+              : showRadiusList
+                ? `В радиусе: ${radiusResults!.total}`
+                : `Объекты: ${total}`}
           {loading && <span className="muted"> · загрузка…</span>}
         </h3>
 
@@ -350,6 +468,23 @@ export default function Sidebar(props: Props) {
                 onSelect={onSelect}
                 onOpenPage={onOpenPage}
                 isFavorite={favorites.has(o.id)}
+                onToggleFavorite={onToggleFavorite}
+              />
+            ))}
+
+          {showRouteList &&
+            route!.items.map((s, i) => (
+              <ListRow
+                key={s.id}
+                id={s.id}
+                name={s.name}
+                category={s.category}
+                distance={s.cumulative_meters}
+                prefix={<span className="walk-num">{i + 1}</span>}
+                selected={s.id === selectedId}
+                onSelect={onSelect}
+                onOpenPage={onOpenPage}
+                isFavorite={favorites.has(s.id)}
                 onToggleFavorite={onToggleFavorite}
               />
             ))}
@@ -371,6 +506,7 @@ export default function Sidebar(props: Props) {
             ))}
 
           {!showSearchList && !showRadiusList &&
+            !showRouteList &&
             features.map((f) => (
               <ListRow
                 key={f.id}
@@ -397,7 +533,7 @@ export default function Sidebar(props: Props) {
             В избранном пока пусто. Нажмите ☆ рядом с объектом.
           </p>
         )}
-        {!showSearchList && !showRadiusList && total > features.length && (
+        {!showSearchList && !showRadiusList && !showRouteList && total > features.length && (
           <p className="muted">Показаны первые {features.length} из {total}.</p>
         )}
       </section>
