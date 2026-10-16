@@ -43,6 +43,8 @@ interface Props {
   onRadiusChange: (m: number) => void;
   radiusResults: RadiusResponse | null;
   onLocate: () => void;
+  /** задан ли центр радиуса: без него «Прогулку» строить не от чего */
+  hasCenter: boolean;
   /** «Прогулка»: построенный пеший маршрут и его состояние */
   route: WalkRouteResponse | null;
   routeLoading: boolean;
@@ -126,7 +128,7 @@ export default function Sidebar(props: Props) {
     categories, stats, density, neighbours, filters, onFiltersChange, features, total, loading,
     selectedId, onSelect, onOpenPage, searchResults, searchTotal,
     radiusMode, onToggleRadiusMode, radiusMeters, onRadiusChange,
-    radiusResults, onLocate,
+    radiusResults, onLocate, hasCenter,
     route, routeLoading, onBuildRoute, onClearRoute,
     favorites, onToggleFavorite, onlyFavorites, onToggleOnlyFavorites,
   } = props;
@@ -239,9 +241,13 @@ export default function Sidebar(props: Props) {
               </div>
               <button
                 className="btn wide"
-                disabled={routeLoading}
+                disabled={routeLoading || !hasCenter}
                 onClick={() => onBuildRoute(walkCount)}
-                title="Пеший маршрут по ближайшим объектам вокруг выбранного центра"
+                title={
+                  hasCenter
+                    ? "Пеший маршрут по ближайшим объектам вокруг выбранного центра"
+                    : "Сначала кликните по карте, чтобы задать центр прогулки"
+                }
               >
                 {routeLoading ? "Строю маршрут…" : "Построить прогулку"}
               </button>

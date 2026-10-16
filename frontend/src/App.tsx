@@ -532,6 +532,7 @@ function MapShell() {
           onRadiusChange={setRadiusMeters}
           radiusResults={radiusResults}
           onLocate={handleLocate}
+          hasCenter={radiusCenter !== null}
           route={route}
           routeLoading={routeLoading}
           onBuildRoute={buildWalk}
